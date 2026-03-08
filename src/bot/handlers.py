@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -395,11 +397,87 @@ def setup_handlers(
                 parse_mode="Markdown",
             )
 
+    @r.message(Command("local"))
+    async def cmd_local(message: Message) -> None:
+        """List Claude Code sessions from the local machine."""
+        assert message.from_user
+        claude_dir = Path.home() / ".claude" / "projects"
+        if not claude_dir.exists():
+            await message.answer("No local Claude sessions found.")
+            return
+
+        sessions_found: list[tuple[str, str, str, float]] = []  # (id, project, preview, mtime)
+
+        for project_dir in claude_dir.iterdir():
+            if not project_dir.is_dir():
+                continue
+            project_name = project_dir.name.replace("-", "/", 1).replace("-", "/", 1)
+            for jsonl in sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+                session_id = jsonl.stem
+                mtime = jsonl.stat().st_mtime
+                # Read first user message as preview
+                preview = ""
+                try:
+                    with open(jsonl, "r", encoding="utf-8") as f:
+                        for raw_line in f:
+                            event = json.loads(raw_line)
+                            if event.get("type") == "user":
+                                content = event.get("message", {}).get("content", "")
+                                if isinstance(content, str):
+                                    preview = content[:60]
+                                elif isinstance(content, list):
+                                    for block in content:
+                                        if isinstance(block, dict) and block.get("type") == "text":
+                                            preview = block.get("text", "")[:60]
+                                            break
+                                break
+                except Exception:
+                    pass
+                sessions_found.append((session_id, project_name, preview, mtime))
+
+        if not sessions_found:
+            await message.answer("No local Claude sessions found.")
+            return
+
+        # Sort by mtime descending, take top 10
+        sessions_found.sort(key=lambda x: x[3], reverse=True)
+        sessions_found = sessions_found[:10]
+
+        buttons = []
+        for sid, project, preview, mtime in sessions_found:
+            dt = datetime.fromtimestamp(mtime).strftime("%m/%d %H:%M")
+            label = f"[{dt}] {preview or '(empty)'}".rstrip()
+            if len(label) > 50:
+                label = label[:47] + "..."
+            buttons.append([InlineKeyboardButton(
+                text=label, callback_data=f"local:{sid}"
+            )])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer("Local Claude sessions (recent 10):", reply_markup=keyboard)
+
+    @r.callback_query(F.data.startswith("local:"))
+    async def cb_local(callback: CallbackQuery) -> None:
+        assert callback.from_user and callback.data
+        claude_session_id = callback.data.split(":", 1)[1]
+        user_id = callback.from_user.id
+
+        # Set this Claude session ID on the active bot session
+        session = await session_manager.get_or_create_active(user_id)
+        await session_manager.set_claude_session_id(session.id, claude_session_id)
+
+        await callback.answer("Connected!")
+        if callback.message:
+            await callback.message.edit_text(
+                f"Connected to local session.\n`{claude_session_id}`",
+                parse_mode="Markdown",
+            )
+
     # Bot-managed commands
     _bot_commands = {
         "start", "help", "new", "sessions", "switch",
         "current", "rename", "delete", "cancel", "mode",
-        "restart", "pull",
+        "restart", "pull", "local",
     }
 
     def _is_bot_command(text: str) -> bool:

@@ -14,6 +14,7 @@ Send any message to interact with Claude Code remotely. Claude has full access t
 /delete `<id>` — Delete session
 /cancel — Cancel current request
 /mode `[plan|code]` — View/switch mode
+/local — Local Claude sessions (resume any)
 /pull — Git pull + restart (원격 배포)
 /restart — Restart bot
 /help — This message
