@@ -447,14 +447,88 @@ def setup_handlers(
         for sid, project, preview, mtime in sessions_found:
             dt = datetime.fromtimestamp(mtime).strftime("%m/%d %H:%M")
             label = f"[{dt}] {preview or '(empty)'}".rstrip()
-            if len(label) > 50:
-                label = label[:47] + "..."
-            buttons.append([InlineKeyboardButton(
-                text=label, callback_data=f"local:{sid}"
-            )])
+            if len(label) > 40:
+                label = label[:37] + "..."
+            buttons.append([
+                InlineKeyboardButton(text=label, callback_data=f"peek:{sid}"),
+                InlineKeyboardButton(text="Connect", callback_data=f"local:{sid}"),
+            ])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await message.answer("Local Claude sessions (recent 10):", reply_markup=keyboard)
+        await message.answer("Local Claude sessions (recent 10):\nTap to peek, [Connect] to switch.", reply_markup=keyboard)
+
+    def _peek_session(session_id: str) -> str:
+        """Read last few user/assistant messages from a local session JSONL."""
+        claude_dir = Path.home() / ".claude" / "projects"
+        # Find the JSONL file
+        for project_dir in claude_dir.iterdir():
+            if not project_dir.is_dir():
+                continue
+            jsonl = project_dir / f"{session_id}.jsonl"
+            if jsonl.exists():
+                return _extract_recent_messages(jsonl)
+        return "(session file not found)"
+
+    def _extract_recent_messages(jsonl: Path, max_msgs: int = 6) -> str:
+        """Extract recent user/assistant text messages from JSONL."""
+        messages: list[tuple[str, str]] = []  # (role, text)
+        try:
+            with open(jsonl, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    try:
+                        event = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
+                    etype = event.get("type", "")
+                    if etype == "user":
+                        content = event.get("message", {}).get("content", "")
+                        text = _extract_text(content)
+                        if text:
+                            messages.append(("You", text))
+                    elif etype == "assistant":
+                        msg = event.get("message", {})
+                        content = msg.get("content", [])
+                        text = _extract_text(content)
+                        if text:
+                            messages.append(("Claude", text))
+        except Exception:
+            return "(error reading session)"
+
+        if not messages:
+            return "(empty session)"
+
+        recent = messages[-max_msgs:]
+        lines = []
+        for role, text in recent:
+            preview = text[:150].replace("\n", " ")
+            if len(text) > 150:
+                preview += "..."
+            lines.append(f"**{role}**: {preview}")
+        return "\n\n".join(lines)
+
+    def _extract_text(content: object) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            return "\n".join(parts).strip()
+        return ""
+
+    @r.callback_query(F.data.startswith("peek:"))
+    async def cb_peek(callback: CallbackQuery) -> None:
+        assert callback.from_user and callback.data
+        session_id = callback.data.split(":", 1)[1]
+        preview = _peek_session(session_id)
+        # Send as a new message (too long for callback answer)
+        if callback.message:
+            try:
+                await callback.message.answer(preview, parse_mode="Markdown")
+            except Exception:
+                await callback.message.answer(preview)
+        await callback.answer()
 
     @r.callback_query(F.data.startswith("local:"))
     async def cb_local(callback: CallbackQuery) -> None:
@@ -462,7 +536,6 @@ def setup_handlers(
         claude_session_id = callback.data.split(":", 1)[1]
         user_id = callback.from_user.id
 
-        # Set this Claude session ID on the active bot session
         session = await session_manager.get_or_create_active(user_id)
         await session_manager.set_claude_session_id(session.id, claude_session_id)
 
