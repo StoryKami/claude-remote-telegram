@@ -44,7 +44,7 @@ async def main() -> None:
     dp.message.middleware(AuthMiddleware(auth_service))
     dp.callback_query.middleware(AuthMiddleware(auth_service))
 
-    setup_handlers(router, bridge, session_manager)
+    setup_handlers(router, bridge, session_manager, settings.get_workspace_path())
     dp.include_router(router)
 
     logger.info("Workspace: %s", settings.get_workspace_path())

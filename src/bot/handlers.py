@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from aiogram import Router, F
+from aiogram import Bot, Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message,
@@ -25,12 +27,11 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# Per-user locks to serialize message processing
+# Per-user state
 _user_locks: dict[int, asyncio.Lock] = {}
-# Per-user cancel flags
 _cancel_flags: dict[int, bool] = {}
-# Per-user mode: "code" (default) or "plan"
 _user_modes: dict[int, str] = {}
+_message_queues: dict[int, list[tuple[Message, str]]] = {}
 
 PLAN_MODE_PREFIX = (
     "[PLAN MODE] You are in plan mode. Do NOT edit, write, or create any files. "
@@ -48,8 +49,130 @@ def setup_handlers(
     r: Router,
     bridge: ClaudeBridge,
     session_manager: SessionManager,
+    workspace_path: Path,
 ) -> None:
     """Register all handlers with dependencies injected."""
+
+    tmp_dir = workspace_path / "_tmp" / "telegram"
+
+    async def _save_telegram_file(bot: Bot, file_id: str, ext: str = ".jpg") -> Path:
+        """Download a Telegram file to workspace tmp dir."""
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        name = f"{uuid.uuid4().hex[:8]}{ext}"
+        dest = tmp_dir / name
+        file_info = await bot.get_file(file_id)
+        assert file_info.file_path
+        await bot.download_file(file_info.file_path, str(dest))
+        return dest
+
+    async def _process_prompt(
+        message: Message,
+        user_id: int,
+        prompt: str,
+    ) -> None:
+        """Process a single prompt through Claude bridge."""
+        _cancel_flags[user_id] = False
+        session = await session_manager.get_or_create_active(user_id)
+        mode = _user_modes.get(user_id, "code")
+
+        if mode == "plan":
+            prompt = PLAN_MODE_PREFIX + prompt
+
+        mode_label = f"[{mode}] " if mode != "code" else ""
+        status_msg = await message.answer(f"{mode_label}Thinking...")
+        last_edit = time.monotonic()
+        accumulated_text = ""
+        last_tool_status = ""
+
+        try:
+            async for event in bridge.send_message(
+                prompt=prompt,
+                claude_session_id=session.claude_session_id,
+            ):
+                if _cancel_flags.get(user_id):
+                    raise asyncio.CancelledError()
+
+                if event.type == "text":
+                    accumulated_text += event.data
+                    now = time.monotonic()
+                    if now - last_edit >= 2.5:
+                        preview = accumulated_text[-3500:]
+                        if len(accumulated_text) > 3500:
+                            preview = "...\n" + preview
+                        try:
+                            await status_msg.edit_text(preview or "...")
+                        except Exception:
+                            pass
+                        last_edit = now
+
+                elif event.type == "tool_use":
+                    last_tool_status = event.data
+                    try:
+                        await status_msg.edit_text(f"⏳ {event.data}")
+                    except Exception:
+                        pass
+
+                elif event.type == "tool_result":
+                    try:
+                        await status_msg.edit_text(f"✓ {last_tool_status}")
+                    except Exception:
+                        pass
+
+                elif event.type == "error":
+                    await status_msg.edit_text(f"Error: {event.data[:4000]}")
+                    return
+
+                elif event.type == "done":
+                    if event.session_id:
+                        await session_manager.set_claude_session_id(
+                            session.id, event.session_id
+                        )
+                    await session_manager.touch_session(session.id)
+                    if event.data and not accumulated_text:
+                        accumulated_text = event.data
+
+        except asyncio.CancelledError:
+            await status_msg.edit_text("Cancelled.")
+            return
+        except Exception as e:
+            logger.exception("Error processing message")
+            await status_msg.edit_text(f"Error: {e}")
+            return
+
+        if not accumulated_text:
+            await status_msg.edit_text("(no response)")
+            return
+
+        chunks = format_telegram_message(accumulated_text)
+
+        try:
+            await status_msg.edit_text(chunks[0])
+        except Exception:
+            await message.answer(chunks[0])
+
+        for chunk in chunks[1:]:
+            await message.answer(chunk)
+
+    async def _process_with_queue(
+        message: Message, user_id: int, prompt: str,
+    ) -> None:
+        """Process prompt with per-user lock and message queue."""
+        lock = _get_lock(user_id)
+        if lock.locked():
+            queue = _message_queues.setdefault(user_id, [])
+            queue.append((message, prompt))
+            await message.answer(f"Queued (#{len(queue)}). Will process after current task.")
+            return
+
+        async with lock:
+            await _process_prompt(message, user_id, prompt)
+            # Drain queued messages
+            while _message_queues.get(user_id):
+                queued_msg, queued_prompt = _message_queues[user_id].pop(0)
+                _cancel_flags[user_id] = False
+                await _process_prompt(queued_msg, user_id, queued_prompt)
+
+    # --- Bot commands ---
 
     @r.message(CommandStart())
     async def cmd_start(message: Message) -> None:
@@ -168,8 +291,10 @@ def setup_handlers(
     @r.message(Command("cancel"))
     async def cmd_cancel(message: Message) -> None:
         assert message.from_user
-        _cancel_flags[message.from_user.id] = True
-        await message.answer("Cancelling...")
+        user_id = message.from_user.id
+        _cancel_flags[user_id] = True
+        _message_queues.pop(user_id, None)
+        await message.answer("Cancelling... (queue cleared)")
 
     @r.message(Command("mode"))
     async def cmd_mode(message: Message) -> None:
@@ -179,10 +304,16 @@ def setup_handlers(
 
         if arg in ("plan", "p"):
             _user_modes[user_id] = "plan"
-            await message.answer("Switched to **plan** mode. Claude will only analyze and plan, not modify files.", parse_mode="Markdown")
+            await message.answer(
+                "Switched to **plan** mode. Claude will only analyze and plan, not modify files.",
+                parse_mode="Markdown",
+            )
         elif arg in ("code", "c", "normal"):
             _user_modes[user_id] = "code"
-            await message.answer("Switched to **code** mode. Claude can read, write, and execute.", parse_mode="Markdown")
+            await message.answer(
+                "Switched to **code** mode. Claude can read, write, and execute.",
+                parse_mode="Markdown",
+            )
         else:
             current = _user_modes.get(user_id, "code")
             await message.answer(
@@ -192,7 +323,7 @@ def setup_handlers(
                 parse_mode="Markdown",
             )
 
-    # Bot-managed commands — everything else (including /plan, /review, etc.) goes to Claude
+    # Bot-managed commands
     _bot_commands = {
         "start", "help", "new", "sessions", "switch",
         "current", "rename", "delete", "cancel", "mode",
@@ -201,104 +332,48 @@ def setup_handlers(
     def _is_bot_command(text: str) -> bool:
         if not text.startswith("/"):
             return False
-        cmd = text.split()[0].lstrip("/").split("@")[0]  # handle /cmd@botname
+        cmd = text.split()[0].lstrip("/").split("@")[0]
         return cmd in _bot_commands
+
+    # --- Content handlers (photo, document, text) ---
+
+    @r.message(F.photo)
+    async def handle_photo(message: Message) -> None:
+        assert message.from_user and message.bot
+        user_id = message.from_user.id
+        photo = message.photo[-1]  # largest size
+
+        try:
+            filepath = await _save_telegram_file(message.bot, photo.file_id, ".jpg")
+        except Exception as e:
+            await message.answer(f"Failed to download image: {e}")
+            return
+
+        caption = message.caption or "Please analyze this image."
+        prompt = f"I'm sharing an image. View it at: {filepath}\n\n{caption}"
+        await _process_with_queue(message, user_id, prompt)
+
+    @r.message(F.document)
+    async def handle_document(message: Message) -> None:
+        assert message.from_user and message.bot and message.document
+        user_id = message.from_user.id
+        doc = message.document
+        filename = doc.file_name or "file"
+        ext = Path(filename).suffix or ".bin"
+
+        try:
+            filepath = await _save_telegram_file(message.bot, doc.file_id, ext)
+        except Exception as e:
+            await message.answer(f"Failed to download file: {e}")
+            return
+
+        caption = message.caption or f"Please analyze this file: {filename}"
+        prompt = f"I'm sharing a file ({filename}). Read it at: {filepath}\n\n{caption}"
+        await _process_with_queue(message, user_id, prompt)
 
     @r.message(F.text)
     async def handle_message(message: Message) -> None:
         if message.text and _is_bot_command(message.text):
-            return  # already handled by Command filters above
-        assert message.from_user and message.text
-        user_id = message.from_user.id
-
-        lock = _get_lock(user_id)
-        if lock.locked():
-            await message.answer("Processing previous message... please wait.")
             return
-
-        async with lock:
-            _cancel_flags[user_id] = False
-            session = await session_manager.get_or_create_active(user_id)
-            mode = _user_modes.get(user_id, "code")
-
-            mode_label = f"[{mode}] " if mode != "code" else ""
-            status_msg = await message.answer(f"{mode_label}Thinking...")
-            last_edit = time.monotonic()
-            accumulated_text = ""
-            last_tool_status = ""
-
-            prompt = message.text
-            if mode == "plan":
-                prompt = PLAN_MODE_PREFIX + prompt
-
-            try:
-                async for event in bridge.send_message(
-                    prompt=prompt,
-                    claude_session_id=session.claude_session_id,
-                ):
-                    if _cancel_flags.get(user_id):
-                        raise asyncio.CancelledError()
-
-                    if event.type == "text":
-                        accumulated_text += event.data
-                        now = time.monotonic()
-                        if now - last_edit >= 2.5:
-                            preview = accumulated_text[-3500:]
-                            if len(accumulated_text) > 3500:
-                                preview = "...\n" + preview
-                            try:
-                                await status_msg.edit_text(preview or "...")
-                            except Exception:
-                                pass
-                            last_edit = now
-
-                    elif event.type == "tool_use":
-                        last_tool_status = event.data
-                        try:
-                            await status_msg.edit_text(f"⏳ {event.data}")
-                        except Exception:
-                            pass
-
-                    elif event.type == "tool_result":
-                        try:
-                            await status_msg.edit_text(f"✓ {last_tool_status}")
-                        except Exception:
-                            pass
-
-                    elif event.type == "error":
-                        await status_msg.edit_text(f"Error: {event.data[:4000]}")
-                        return
-
-                    elif event.type == "done":
-                        # Capture claude session ID for future --resume
-                        if event.session_id:
-                            await session_manager.set_claude_session_id(
-                                session.id, event.session_id
-                            )
-                        await session_manager.touch_session(session.id)
-                        # Use final text from done event if we have it
-                        if event.data and not accumulated_text:
-                            accumulated_text = event.data
-
-            except asyncio.CancelledError:
-                await status_msg.edit_text("Cancelled.")
-                return
-            except Exception as e:
-                logger.exception("Error processing message")
-                await status_msg.edit_text(f"Error: {e}")
-                return
-
-            # Send final response
-            if not accumulated_text:
-                await status_msg.edit_text("(no response)")
-                return
-
-            chunks = format_telegram_message(accumulated_text)
-
-            try:
-                await status_msg.edit_text(chunks[0])
-            except Exception:
-                await message.answer(chunks[0])
-
-            for chunk in chunks[1:]:
-                await message.answer(chunk)
+        assert message.from_user and message.text
+        await _process_with_queue(message, message.from_user.id, message.text)

@@ -16,6 +16,10 @@ Send any message to interact with Claude Code remotely. Claude has full access t
 /mode `[plan|code]` — View/switch mode
 /help — This message
 
+**Media:**
+사진, 스크린샷, 파일(PDF 등)을 보내면 Claude가 분석합니다.
+작업 중에도 메시지를 보내면 큐에 쌓여 순차 처리됩니다.
+
 **Claude Skills (pass-through):**
 /plan, /review, /simplify, /verify, /tdd, /commit\\_push\\_pr, /frontend, /spec, /handoff, /build\\_fix, /techdebt 등
 위 명령어는 Claude Code에 그대로 전달됩니다.
