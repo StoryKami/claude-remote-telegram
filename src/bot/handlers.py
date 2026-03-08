@@ -71,15 +71,15 @@ def setup_handlers(
     async def _animate_thinking(
         status_msg: Message, mode_label: str, start: float,
     ) -> None:
-        """Animate thinking dots so user knows the bot is alive."""
-        dots = [".", "..", "...", "..", "."]
+        """Animate thinking spinner so user knows the bot is alive."""
+        frames = ["◐", "◓", "◑", "◒"]
         i = 0
         while True:
             await asyncio.sleep(2)
             elapsed = int(time.monotonic() - start)
             try:
                 await status_msg.edit_text(
-                    f"{mode_label}Thinking{dots[i % len(dots)]} ({elapsed}s)"
+                    f"{mode_label}{frames[i % len(frames)]} Thinking... ({elapsed}s)"
                 )
             except Exception:
                 pass

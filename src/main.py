@@ -62,6 +62,13 @@ async def main() -> None:
         BotCommand(command="help", description="Help"),
     ])
 
+    # Notify users that bot has (re)started
+    for uid in settings.get_allowed_user_ids():
+        try:
+            await bot.send_message(uid, "Bot restarted.")
+        except Exception:
+            pass
+
     logger.info("Workspace: %s", settings.get_workspace_path())
     logger.info("Bot starting...")
     try:
