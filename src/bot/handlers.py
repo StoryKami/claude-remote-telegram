@@ -29,6 +29,13 @@ router = Router()
 _user_locks: dict[int, asyncio.Lock] = {}
 # Per-user cancel flags
 _cancel_flags: dict[int, bool] = {}
+# Per-user mode: "code" (default) or "plan"
+_user_modes: dict[int, str] = {}
+
+PLAN_MODE_PREFIX = (
+    "[PLAN MODE] You are in plan mode. Do NOT edit, write, or create any files. "
+    "Do NOT execute commands that modify state. Only analyze, research, and provide plans.\n\n"
+)
 
 
 def _get_lock(user_id: int) -> asyncio.Lock:
@@ -124,10 +131,12 @@ def setup_handlers(
         assert message.from_user
         session = await session_manager.get_or_create_active(message.from_user.id)
         cli_id = session.claude_session_id or "(new)"
+        mode = _user_modes.get(message.from_user.id, "code")
         text = (
             f"Session: **{session.name}**\n"
             f"ID: `{session.id}`\n"
             f"Claude Session: `{cli_id}`\n"
+            f"Mode: **{mode}**\n"
             f"Created: {session.created_at.strftime('%Y-%m-%d %H:%M')}"
         )
         await message.answer(text, parse_mode="Markdown")
@@ -162,10 +171,31 @@ def setup_handlers(
         _cancel_flags[message.from_user.id] = True
         await message.answer("Cancelling...")
 
+    @r.message(Command("mode"))
+    async def cmd_mode(message: Message) -> None:
+        assert message.from_user
+        user_id = message.from_user.id
+        arg = (message.text or "").replace("/mode", "").strip().lower()
+
+        if arg in ("plan", "p"):
+            _user_modes[user_id] = "plan"
+            await message.answer("Switched to **plan** mode. Claude will only analyze and plan, not modify files.", parse_mode="Markdown")
+        elif arg in ("code", "c", "normal"):
+            _user_modes[user_id] = "code"
+            await message.answer("Switched to **code** mode. Claude can read, write, and execute.", parse_mode="Markdown")
+        else:
+            current = _user_modes.get(user_id, "code")
+            await message.answer(
+                f"Current mode: **{current}**\n\n"
+                "`/mode plan` — plan only (no file changes)\n"
+                "`/mode code` — full access (default)",
+                parse_mode="Markdown",
+            )
+
     # Bot-managed commands — everything else (including /plan, /review, etc.) goes to Claude
     _bot_commands = {
         "start", "help", "new", "sessions", "switch",
-        "current", "rename", "delete", "cancel",
+        "current", "rename", "delete", "cancel", "mode",
     }
 
     def _is_bot_command(text: str) -> bool:
@@ -189,15 +219,21 @@ def setup_handlers(
         async with lock:
             _cancel_flags[user_id] = False
             session = await session_manager.get_or_create_active(user_id)
+            mode = _user_modes.get(user_id, "code")
 
-            status_msg = await message.answer("Thinking...")
+            mode_label = f"[{mode}] " if mode != "code" else ""
+            status_msg = await message.answer(f"{mode_label}Thinking...")
             last_edit = time.monotonic()
             accumulated_text = ""
             last_tool_status = ""
 
+            prompt = message.text
+            if mode == "plan":
+                prompt = PLAN_MODE_PREFIX + prompt
+
             try:
                 async for event in bridge.send_message(
-                    prompt=message.text,
+                    prompt=prompt,
                     claude_session_id=session.claude_session_id,
                 ):
                     if _cancel_flags.get(user_id):

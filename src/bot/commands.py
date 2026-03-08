@@ -13,6 +13,7 @@ Send any message to interact with Claude Code remotely. Claude has full access t
 /rename `<name>` — Rename session
 /delete `<id>` — Delete session
 /cancel — Cancel current request
+/mode `[plan|code]` — View/switch mode
 /help — This message
 
 **Claude Skills (pass-through):**
