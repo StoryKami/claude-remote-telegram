@@ -57,6 +57,8 @@ async def main() -> None:
         BotCommand(command="delete", description="Delete session"),
         BotCommand(command="mode", description="View/switch mode (plan|code)"),
         BotCommand(command="cancel", description="Cancel current request"),
+        BotCommand(command="pull", description="Git pull + restart"),
+        BotCommand(command="restart", description="Restart bot"),
         BotCommand(command="help", description="Help"),
     ])
 

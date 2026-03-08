@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -296,6 +299,36 @@ def setup_handlers(
         _message_queues.pop(user_id, None)
         await message.answer("Cancelling... (queue cleared)")
 
+    @r.message(Command("restart"))
+    async def cmd_restart(message: Message) -> None:
+        assert message.from_user
+        await message.answer("Restarting bot...")
+        logger.info("Restart requested by user %d", message.from_user.id)
+        # Give Telegram time to deliver the message
+        await asyncio.sleep(0.5)
+        os.execv(sys.executable, [sys.executable, "-m", "src.main"])
+
+    @r.message(Command("pull"))
+    async def cmd_pull(message: Message) -> None:
+        assert message.from_user
+        project_dir = Path(__file__).resolve().parent.parent.parent
+        try:
+            result = subprocess.run(
+                ["git", "pull"],
+                cwd=str(project_dir),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = result.stdout.strip() or result.stderr.strip() or "(no output)"
+            await message.answer(f"`{output}`\n\nRestarting...", parse_mode="Markdown")
+        except Exception as e:
+            await message.answer(f"Git pull failed: {e}")
+            return
+        logger.info("Pull + restart requested by user %d", message.from_user.id)
+        await asyncio.sleep(0.5)
+        os.execv(sys.executable, [sys.executable, "-m", "src.main"])
+
     @r.message(Command("mode"))
     async def cmd_mode(message: Message) -> None:
         assert message.from_user
@@ -327,6 +360,7 @@ def setup_handlers(
     _bot_commands = {
         "start", "help", "new", "sessions", "switch",
         "current", "rename", "delete", "cancel", "mode",
+        "restart", "pull",
     }
 
     def _is_bot_command(text: str) -> bool:
