@@ -5,7 +5,7 @@ HELP_TEXT = """
 
 Send any message to interact with Claude Code remotely. Claude has full access to tools (bash, file ops, etc.) on the server.
 
-**Commands:**
+**Bot Commands:**
 /new `[name]` — New session (fresh context)
 /sessions — List sessions
 /switch `<id>` — Switch session
@@ -14,6 +14,10 @@ Send any message to interact with Claude Code remotely. Claude has full access t
 /delete `<id>` — Delete session
 /cancel — Cancel current request
 /help — This message
+
+**Claude Skills (pass-through):**
+/plan, /review, /simplify, /verify, /tdd, /commit\\_push\\_pr, /frontend, /spec, /handoff, /build\\_fix, /techdebt 등
+위 명령어는 Claude Code에 그대로 전달됩니다.
 """.strip()
 
 WELCOME_TEXT = """

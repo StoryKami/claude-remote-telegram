@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -36,6 +37,7 @@ class ClaudeBridge:
             self._cli,
             "-p",
             "--output-format", "stream-json",
+            "--verbose",
             "--permission-mode", self._permission_mode,
         ]
         if self._model:
@@ -55,12 +57,16 @@ class ClaudeBridge:
         cmd = self._build_command(prompt, claude_session_id)
         logger.info("CLI command: %s", " ".join(cmd[:6]) + "...")
 
+        # Remove CLAUDECODE env var to allow running inside a Claude Code session
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self._workspace),
+                env=env,
             )
         except FileNotFoundError:
             yield StreamEvent("error", f"Claude CLI not found: {self._cli}")

@@ -162,8 +162,22 @@ def setup_handlers(
         _cancel_flags[message.from_user.id] = True
         await message.answer("Cancelling...")
 
-    @r.message(F.text & ~F.text.startswith("/"))
+    # Bot-managed commands — everything else (including /plan, /review, etc.) goes to Claude
+    _bot_commands = {
+        "start", "help", "new", "sessions", "switch",
+        "current", "rename", "delete", "cancel",
+    }
+
+    def _is_bot_command(text: str) -> bool:
+        if not text.startswith("/"):
+            return False
+        cmd = text.split()[0].lstrip("/").split("@")[0]  # handle /cmd@botname
+        return cmd in _bot_commands
+
+    @r.message(F.text)
     async def handle_message(message: Message) -> None:
+        if message.text and _is_bot_command(message.text):
+            return  # already handled by Command filters above
         assert message.from_user and message.text
         user_id = message.from_user.id
 
