@@ -68,6 +68,23 @@ def setup_handlers(
         await bot.download_file(file_info.file_path, str(dest))
         return dest
 
+    async def _animate_thinking(
+        status_msg: Message, mode_label: str, start: float,
+    ) -> None:
+        """Animate thinking dots so user knows the bot is alive."""
+        dots = [".", "..", "...", "..", "."]
+        i = 0
+        while True:
+            await asyncio.sleep(2)
+            elapsed = int(time.monotonic() - start)
+            try:
+                await status_msg.edit_text(
+                    f"{mode_label}Thinking{dots[i % len(dots)]} ({elapsed}s)"
+                )
+            except Exception:
+                pass
+            i += 1
+
     async def _process_prompt(
         message: Message,
         user_id: int,
@@ -82,10 +99,16 @@ def setup_handlers(
             prompt = PLAN_MODE_PREFIX + prompt
 
         mode_label = f"[{mode}] " if mode != "code" else ""
-        status_msg = await message.answer(f"{mode_label}Thinking...")
-        last_edit = time.monotonic()
+        start_time = time.monotonic()
+        status_msg = await message.answer(f"{mode_label}Thinking.")
+        last_edit = start_time
         accumulated_text = ""
         last_tool_status = ""
+
+        # Start dot animation — cancelled on first real event
+        thinking_task = asyncio.create_task(
+            _animate_thinking(status_msg, mode_label, start_time)
+        )
 
         try:
             async for event in bridge.send_message(
@@ -95,29 +118,42 @@ def setup_handlers(
                 if _cancel_flags.get(user_id):
                     raise asyncio.CancelledError()
 
+                # Stop animation on first real event
+                if not thinking_task.done():
+                    thinking_task.cancel()
+
                 if event.type == "text":
                     accumulated_text += event.data
                     now = time.monotonic()
                     if now - last_edit >= 2.5:
+                        elapsed = int(now - start_time)
                         preview = accumulated_text[-3500:]
                         if len(accumulated_text) > 3500:
                             preview = "...\n" + preview
                         try:
-                            await status_msg.edit_text(preview or "...")
+                            await status_msg.edit_text(
+                                f"{preview or '...'}\n\n({elapsed}s)"
+                            )
                         except Exception:
                             pass
                         last_edit = now
 
                 elif event.type == "tool_use":
                     last_tool_status = event.data
+                    elapsed = int(time.monotonic() - start_time)
                     try:
-                        await status_msg.edit_text(f"⏳ {event.data}")
+                        await status_msg.edit_text(
+                            f"⏳ {event.data} ({elapsed}s)"
+                        )
                     except Exception:
                         pass
 
                 elif event.type == "tool_result":
+                    elapsed = int(time.monotonic() - start_time)
                     try:
-                        await status_msg.edit_text(f"✓ {last_tool_status}")
+                        await status_msg.edit_text(
+                            f"✓ {last_tool_status} ({elapsed}s)"
+                        )
                     except Exception:
                         pass
 
@@ -141,6 +177,9 @@ def setup_handlers(
             logger.exception("Error processing message")
             await status_msg.edit_text(f"Error: {e}")
             return
+        finally:
+            if not thinking_task.done():
+                thinking_task.cancel()
 
         if not accumulated_text:
             await status_msg.edit_text("(no response)")
