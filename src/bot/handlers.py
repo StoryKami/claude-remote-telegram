@@ -72,7 +72,7 @@ def setup_handlers(
         status_msg: Message, mode_label: str, start: float,
     ) -> None:
         """Animate thinking spinner so user knows the bot is alive."""
-        frames = ["◐", "◓", "◑", "◒"]
+        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         i = 0
         while True:
             await asyncio.sleep(2)
