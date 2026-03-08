@@ -67,6 +67,7 @@ class ClaudeBridge:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self._workspace),
                 env=env,
+                limit=10 * 1024 * 1024,  # 10MB — large JSON lines from image reads
             )
         except FileNotFoundError:
             yield StreamEvent("error", f"Claude CLI not found: {self._cli}")
