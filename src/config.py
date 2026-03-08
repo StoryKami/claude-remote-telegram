@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import platform
 from pathlib import Path
 
 from pydantic import field_validator
@@ -12,25 +11,21 @@ class Settings(BaseSettings):
 
     # Required
     telegram_bot_token: str
-    anthropic_api_key: str
     allowed_user_ids: str  # comma-separated
 
-    # Claude
-    claude_model: str = "claude-sonnet-4-20250514"
-    claude_max_tokens: int = 8192
+    # Claude CLI
+    claude_cli_path: str = "claude"
+    claude_model: str = ""  # empty = use CLI default
+    claude_permission_mode: str = "bypassPermissions"
+    claude_max_budget_usd: float = 0  # 0 = no limit
 
     # Paths
-    workspace_dir: str = "./workspace"
+    workspace_dir: str = "."
     db_path: str = "data/sessions.db"
 
     # Limits
     max_sessions_per_user: int = 10
-    session_max_messages: int = 200
-    bash_timeout: int = 30
-    bash_max_timeout: int = 300
-    max_output_size: int = 51200  # 50KB
-    max_file_size: int = 1048576  # 1MB
-    max_tool_loops: int = 20
+    cli_timeout: int = 300  # seconds
 
     # Logging
     log_level: str = "INFO"
@@ -52,25 +47,6 @@ class Settings(BaseSettings):
 
     def get_db_path(self) -> Path:
         return Path(self.db_path).resolve()
-
-    def get_system_prompt(self) -> str:
-        ws = self.get_workspace_path()
-        return (
-            "You are a remote coding assistant accessible via Telegram.\n"
-            "You can execute bash commands, read/write files on the server.\n"
-            "\n"
-            "Environment:\n"
-            f"- OS: {platform.system()} {platform.release()}\n"
-            f"- Platform: {platform.platform()}\n"
-            f"- Workspace: {ws}\n"
-            "\n"
-            "Rules:\n"
-            "- Never execute destructive commands (rm -rf /, shutdown, reboot, etc.)\n"
-            "- Read file contents before modifying them.\n"
-            "- Keep responses concise and Telegram-friendly.\n"
-            "- Use markdown code blocks for code.\n"
-            "- When executing commands, prefer the workspace directory.\n"
-        )
 
 
 def load_settings() -> Settings:

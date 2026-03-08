@@ -1,5 +1,4 @@
 aiogram>=3.4
-anthropic>=0.40
 aiosqlite>=0.20
 pydantic>=2.0
 pydantic-settings>=2.0

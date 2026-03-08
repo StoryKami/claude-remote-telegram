@@ -9,24 +9,7 @@ class Session:
     id: str
     user_id: int
     name: str
-    model: str
-    system_prompt: str | None
+    claude_session_id: str | None  # Claude CLI session ID
     is_active: bool
     created_at: datetime
     updated_at: datetime
-
-
-@dataclass(frozen=True)
-class Message:
-    id: str
-    session_id: str
-    role: str  # "user" | "assistant"
-    content: str  # JSON-serialized content blocks
-    created_at: datetime
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    success: bool
-    output: str
-    error: str | None = None

@@ -1,42 +1,45 @@
 # claude-remote-telegram
 
-Control Claude remotely via Telegram. Execute commands, read/write files, and manage conversation sessions — all from your phone.
+Control your Claude Code sessions remotely via Telegram. Send messages from your phone, Claude Code executes on your server.
+
+## How It Works
+
+```
+Telegram → Bot → claude CLI (already authenticated) → Response → Telegram
+```
+
+No API key needed — uses your existing Claude Code authentication (API key or OAuth).
 
 ## Features
 
-- **Chat with Claude** — natural language conversation via Telegram
-- **Code execution** — Claude can run bash/cmd commands on your server
-- **File operations** — read, write, and list files
-- **Session management** — multiple persistent conversation sessions
-- **Security** — user whitelist, path sandboxing, command filtering
-- **Portable** — Docker support, `.env` configuration
+- **Full Claude Code** — bash, file ops, search, agents — everything the CLI can do
+- **Session management** — multiple persistent sessions with `--resume`
+- **Streaming** — real-time progress updates as Claude works
+- **Security** — Telegram user ID whitelist
+- **Portable** — works anywhere Claude Code is installed
 
 ## Quick Start
 
-### 1. Prerequisites
+### Prerequisites
 
 - Python 3.11+
+- Claude Code CLI installed and authenticated (`claude` command works)
 - Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
-- Anthropic API Key
 
-### 2. Setup
+### Setup
 
 ```bash
 git clone https://github.com/StoryKami/claude-remote-telegram.git
 cd claude-remote-telegram
 
-# Create .env from template
 cp .env.example .env
-# Edit .env with your tokens and user ID
+# Edit .env: set TELEGRAM_BOT_TOKEN and ALLOWED_USER_IDS
 
-# Install dependencies
 pip install -r requirements.txt
-
-# Run
 python -m src.main
 ```
 
-### 3. Docker
+### Docker
 
 ```bash
 cp .env.example .env
@@ -46,41 +49,45 @@ docker compose up -d
 
 ## Configuration
 
-See `.env.example` for all options. Required:
-
-| Variable | Description |
-|----------|-------------|
-| `TELEGRAM_BOT_TOKEN` | From @BotFather |
-| `ANTHROPIC_API_KEY` | Anthropic API key |
-| `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Yes | From @BotFather |
+| `ALLOWED_USER_IDS` | Yes | Comma-separated Telegram user IDs |
+| `CLAUDE_CLI_PATH` | No | Path to claude CLI (default: `claude`) |
+| `CLAUDE_MODEL` | No | Override model (default: CLI default) |
+| `CLAUDE_PERMISSION_MODE` | No | Permission mode (default: `bypassPermissions`) |
+| `WORKSPACE_DIR` | No | Working directory for Claude (default: `.`) |
+| `CLI_TIMEOUT` | No | Max seconds per request (default: 300) |
 
 ## Telegram Commands
 
 | Command | Description |
 |---------|-------------|
-| `/new [name]` | Create new session |
+| `/new [name]` | New session (fresh Claude context) |
 | `/sessions` | List all sessions |
-| `/switch <id>` | Switch to session |
+| `/switch <id>` | Switch to a session |
 | `/current` | Current session info |
 | `/rename <name>` | Rename session |
-| `/clear` | Clear session history |
 | `/delete <id>` | Delete session |
-| `/model [name]` | View/change Claude model |
-| `/system [prompt]` | Set custom system prompt |
 | `/cancel` | Cancel current request |
 
 ## Architecture
 
 ```
-Telegram → Bot Handler → Claude API Client → Tool Executor → bash/files
-                ↕                  ↕
-          Auth Middleware    Session Manager (SQLite)
+src/
+├── main.py              # Entry point
+├── config.py            # .env settings
+├── bot/
+│   ├── handlers.py      # Telegram command & message handlers
+│   ├── middleware.py     # Auth middleware
+│   ├── formatters.py    # Message splitting for Telegram limits
+│   └── commands.py      # Help text
+├── claude/
+│   └── bridge.py        # Claude CLI subprocess bridge
+├── session/
+│   ├── manager.py       # Session CRUD
+│   ├── repository.py    # SQLite storage
+│   └── models.py        # Data models
+└── security/
+    └── auth.py          # User whitelist
 ```
-
-## Security
-
-- **User whitelist** — only allowed Telegram user IDs can interact
-- **Path sandbox** — file operations restricted to workspace directory
-- **Command filter** — dangerous commands (rm -rf /, shutdown, etc.) blocked
-- **Timeouts** — bash commands have configurable timeout limits
-- **Output limits** — command output and file sizes are capped

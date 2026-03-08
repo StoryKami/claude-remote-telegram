@@ -15,14 +15,10 @@ from aiogram.types import (
 )
 
 from src.bot.commands import HELP_TEXT, WELCOME_TEXT
-from src.bot.formatters import (
-    format_session_info,
-    format_telegram_message,
-    format_tool_status,
-)
+from src.bot.formatters import format_telegram_message
 
 if TYPE_CHECKING:
-    from src.claude.client import ClaudeClient
+    from src.claude.bridge import ClaudeBridge
     from src.session.manager import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -43,7 +39,7 @@ def _get_lock(user_id: int) -> asyncio.Lock:
 
 def setup_handlers(
     r: Router,
-    claude_client: ClaudeClient,
+    bridge: ClaudeBridge,
     session_manager: SessionManager,
 ) -> None:
     """Register all handlers with dependencies injected."""
@@ -62,7 +58,10 @@ def setup_handlers(
         name = (message.text or "").replace("/new", "").strip() or "untitled"
         try:
             session = await session_manager.create_session(message.from_user.id, name)
-            await message.answer(f"Created session: **{session.name}** (`{session.id}`)", parse_mode="Markdown")
+            await message.answer(
+                f"Created session: **{session.name}** (`{session.id}`)\nNew Claude session (no history).",
+                parse_mode="Markdown",
+            )
         except ValueError as e:
             await message.answer(str(e))
 
@@ -77,6 +76,8 @@ def setup_handlers(
         buttons = []
         for s in sessions:
             label = f"{'> ' if s.is_active else ''}{s.name} ({s.id})"
+            if s.claude_session_id:
+                label += " [resumed]"
             buttons.append([InlineKeyboardButton(
                 text=label, callback_data=f"switch:{s.id}"
             )])
@@ -122,11 +123,14 @@ def setup_handlers(
     async def cmd_current(message: Message) -> None:
         assert message.from_user
         session = await session_manager.get_or_create_active(message.from_user.id)
-        msg_count = await session_manager.get_message_count(session.id)
-        info = format_session_info(
-            session.id, session.name, session.model, msg_count, session.is_active
+        cli_id = session.claude_session_id or "(new)"
+        text = (
+            f"Session: **{session.name}**\n"
+            f"ID: `{session.id}`\n"
+            f"Claude Session: `{cli_id}`\n"
+            f"Created: {session.created_at.strftime('%Y-%m-%d %H:%M')}"
         )
-        await message.answer(f"```\n{info}\n```", parse_mode="Markdown")
+        await message.answer(text, parse_mode="Markdown")
 
     @r.message(Command("rename"))
     async def cmd_rename(message: Message) -> None:
@@ -138,13 +142,6 @@ def setup_handlers(
         session = await session_manager.get_or_create_active(message.from_user.id)
         await session_manager.rename_session(message.from_user.id, session.id, name)
         await message.answer(f"Renamed to: **{name}**", parse_mode="Markdown")
-
-    @r.message(Command("clear"))
-    async def cmd_clear(message: Message) -> None:
-        assert message.from_user
-        session = await session_manager.get_or_create_active(message.from_user.id)
-        await session_manager.clear_messages(session.id)
-        await message.answer("Session history cleared.")
 
     @r.message(Command("delete"))
     async def cmd_delete(message: Message) -> None:
@@ -158,29 +155,6 @@ def setup_handlers(
             await message.answer(f"Deleted session: `{session_id}`", parse_mode="Markdown")
         except ValueError as e:
             await message.answer(str(e))
-
-    @r.message(Command("model"))
-    async def cmd_model(message: Message) -> None:
-        assert message.from_user
-        model_name = (message.text or "").replace("/model", "").strip()
-        session = await session_manager.get_or_create_active(message.from_user.id)
-        if not model_name:
-            await message.answer(f"Current model: `{session.model}`", parse_mode="Markdown")
-            return
-        await session_manager.set_model(session.id, model_name)
-        await message.answer(f"Model changed to: `{model_name}`", parse_mode="Markdown")
-
-    @r.message(Command("system"))
-    async def cmd_system(message: Message) -> None:
-        assert message.from_user
-        prompt = (message.text or "").replace("/system", "").strip()
-        session = await session_manager.get_or_create_active(message.from_user.id)
-        if not prompt:
-            current = session.system_prompt or "(default)"
-            await message.answer(f"System prompt: {current}")
-            return
-        await session_manager.set_system_prompt(session.id, prompt)
-        await message.answer("System prompt updated.")
 
     @r.message(Command("cancel"))
     async def cmd_cancel(message: Message) -> None:
@@ -202,28 +176,15 @@ def setup_handlers(
             _cancel_flags[user_id] = False
             session = await session_manager.get_or_create_active(user_id)
 
-            # Send typing indicator
             status_msg = await message.answer("Thinking...")
-
             last_edit = time.monotonic()
             accumulated_text = ""
-
-            async def on_tool_use(name: str, params: dict) -> None:
-                if _cancel_flags.get(user_id):
-                    raise asyncio.CancelledError()
-                status = format_tool_status(name, params)
-                try:
-                    await status_msg.edit_text(status)
-                except Exception:
-                    pass
+            last_tool_status = ""
 
             try:
-                async for event in claude_client.stream_message(
-                    session_id=session.id,
-                    user_message=message.text,
-                    model=session.model,
-                    system_prompt=session.system_prompt,
-                    on_tool_use=on_tool_use,
+                async for event in bridge.send_message(
+                    prompt=message.text,
+                    claude_session_id=session.claude_session_id,
                 ):
                     if _cancel_flags.get(user_id):
                         raise asyncio.CancelledError()
@@ -231,21 +192,43 @@ def setup_handlers(
                     if event.type == "text":
                         accumulated_text += event.data
                         now = time.monotonic()
-                        if now - last_edit >= 2.0:
-                            preview = accumulated_text[:4000]
-                            if len(accumulated_text) > 4000:
-                                preview += "\n..."
+                        if now - last_edit >= 2.5:
+                            preview = accumulated_text[-3500:]
+                            if len(accumulated_text) > 3500:
+                                preview = "...\n" + preview
                             try:
                                 await status_msg.edit_text(preview or "...")
                             except Exception:
                                 pass
                             last_edit = now
 
-                    elif event.type in ("tool_use", "tool_result"):
+                    elif event.type == "tool_use":
+                        last_tool_status = event.data
                         try:
-                            await status_msg.edit_text(event.data)
+                            await status_msg.edit_text(f"⏳ {event.data}")
                         except Exception:
                             pass
+
+                    elif event.type == "tool_result":
+                        try:
+                            await status_msg.edit_text(f"✓ {last_tool_status}")
+                        except Exception:
+                            pass
+
+                    elif event.type == "error":
+                        await status_msg.edit_text(f"Error: {event.data[:4000]}")
+                        return
+
+                    elif event.type == "done":
+                        # Capture claude session ID for future --resume
+                        if event.session_id:
+                            await session_manager.set_claude_session_id(
+                                session.id, event.session_id
+                            )
+                        await session_manager.touch_session(session.id)
+                        # Use final text from done event if we have it
+                        if event.data and not accumulated_text:
+                            accumulated_text = event.data
 
             except asyncio.CancelledError:
                 await status_msg.edit_text("Cancelled.")
@@ -262,12 +245,10 @@ def setup_handlers(
 
             chunks = format_telegram_message(accumulated_text)
 
-            # Edit first chunk into status message
             try:
                 await status_msg.edit_text(chunks[0])
             except Exception:
                 await message.answer(chunks[0])
 
-            # Send remaining chunks as new messages
             for chunk in chunks[1:]:
                 await message.answer(chunk)
