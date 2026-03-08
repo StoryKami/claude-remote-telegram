@@ -4,10 +4,10 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -36,18 +36,39 @@ router = Router()
 _user_locks: dict[int, asyncio.Lock] = {}
 _cancel_flags: dict[int, bool] = {}
 _user_modes: dict[int, str] = {}
-_message_queues: dict[int, list[tuple[Message, str]]] = {}
+_message_queues: dict[int, deque[tuple[Message, str]]] = {}
 
 PLAN_MODE_PREFIX = (
     "[PLAN MODE] You are in plan mode. Do NOT edit, write, or create any files. "
     "Do NOT execute commands that modify state. Only analyze, research, and provide plans.\n\n"
 )
 
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
 
 def _get_lock(user_id: int) -> asyncio.Lock:
-    if user_id not in _user_locks:
-        _user_locks[user_id] = asyncio.Lock()
-    return _user_locks[user_id]
+    return _user_locks.setdefault(user_id, asyncio.Lock())
+
+
+def _extract_text(content: object) -> str:
+    """Extract text from Claude content field (str or list of blocks)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "\n".join(parts).strip()
+    return ""
+
+
+async def _safe_edit(msg: Message, text: str) -> None:
+    """Edit message text, silently ignoring Telegram API errors."""
+    try:
+        await msg.edit_text(text)
+    except Exception:
+        pass
 
 
 def setup_handlers(
@@ -71,7 +92,7 @@ def setup_handlers(
         return dest
 
     async def _animate_thinking(
-        status_msg: Message, mode_label: str, start: float,
+        status_msg: Message, mode_label: str, start: float, hint: str,
     ) -> None:
         """Animate thinking spinner so user knows the bot is alive."""
         frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -79,12 +100,10 @@ def setup_handlers(
         while True:
             await asyncio.sleep(2)
             elapsed = int(time.monotonic() - start)
-            try:
-                await status_msg.edit_text(
-                    f"{mode_label}{frames[i % len(frames)]} Thinking... ({elapsed}s)"
-                )
-            except Exception:
-                pass
+            await _safe_edit(
+                status_msg,
+                f"{mode_label}{frames[i % len(frames)]} Thinking... ({elapsed}s)\n\n> {hint}",
+            )
             i += 1
 
     async def _process_prompt(
@@ -101,15 +120,20 @@ def setup_handlers(
             prompt = PLAN_MODE_PREFIX + prompt
 
         mode_label = f"[{mode}] " if mode != "code" else ""
+        # Strip plan mode prefix for display
+        display_prompt = prompt.removeprefix(PLAN_MODE_PREFIX)
+        hint = display_prompt[:80].replace("\n", " ")
+        if len(display_prompt) > 80:
+            hint += "..."
+
         start_time = time.monotonic()
-        status_msg = await message.answer(f"{mode_label}Thinking.")
+        status_msg = await message.answer(f"{mode_label}Thinking.\n\n> {hint}")
         last_edit = start_time
         accumulated_text = ""
         last_tool_status = ""
 
-        # Start dot animation — cancelled on first real event
         thinking_task = asyncio.create_task(
-            _animate_thinking(status_msg, mode_label, start_time)
+            _animate_thinking(status_msg, mode_label, start_time, hint)
         )
 
         try:
@@ -120,44 +144,33 @@ def setup_handlers(
                 if _cancel_flags.get(user_id):
                     raise asyncio.CancelledError()
 
-                # Stop animation on first real event
                 if not thinking_task.done():
                     thinking_task.cancel()
+
+                elapsed = int(time.monotonic() - start_time)
 
                 if event.type == "text":
                     accumulated_text += event.data
                     now = time.monotonic()
                     if now - last_edit >= 2.5:
-                        elapsed = int(now - start_time)
                         preview = accumulated_text[-3500:]
                         if len(accumulated_text) > 3500:
                             preview = "...\n" + preview
-                        try:
-                            await status_msg.edit_text(
-                                f"{preview or '...'}\n\n({elapsed}s)"
-                            )
-                        except Exception:
-                            pass
+                        await _safe_edit(
+                            status_msg, f"{preview or '...'}\n\n({elapsed}s)"
+                        )
                         last_edit = now
 
                 elif event.type == "tool_use":
                     last_tool_status = event.data
-                    elapsed = int(time.monotonic() - start_time)
-                    try:
-                        await status_msg.edit_text(
-                            f"⏳ {event.data} ({elapsed}s)"
-                        )
-                    except Exception:
-                        pass
+                    await _safe_edit(
+                        status_msg, f"⏳ {event.data} ({elapsed}s)"
+                    )
 
                 elif event.type == "tool_result":
-                    elapsed = int(time.monotonic() - start_time)
-                    try:
-                        await status_msg.edit_text(
-                            f"✓ {last_tool_status} ({elapsed}s)"
-                        )
-                    except Exception:
-                        pass
+                    await _safe_edit(
+                        status_msg, f"✓ {last_tool_status} ({elapsed}s)"
+                    )
 
                 elif event.type == "error":
                     await status_msg.edit_text(f"Error: {event.data[:4000]}")
@@ -203,16 +216,15 @@ def setup_handlers(
         """Process prompt with per-user lock and message queue."""
         lock = _get_lock(user_id)
         if lock.locked():
-            queue = _message_queues.setdefault(user_id, [])
+            queue = _message_queues.setdefault(user_id, deque())
             queue.append((message, prompt))
             await message.answer(f"Queued (#{len(queue)}). Will process after current task.")
             return
 
         async with lock:
             await _process_prompt(message, user_id, prompt)
-            # Drain queued messages
             while _message_queues.get(user_id):
-                queued_msg, queued_prompt = _message_queues[user_id].pop(0)
+                queued_msg, queued_prompt = _message_queues[user_id].popleft()
                 _cancel_flags[user_id] = False
                 await _process_prompt(queued_msg, user_id, queued_prompt)
 
@@ -345,7 +357,6 @@ def setup_handlers(
         assert message.from_user
         await message.answer("Restarting bot...")
         logger.info("Restart requested by user %d", message.from_user.id)
-        # Give Telegram time to deliver the message
         await asyncio.sleep(0.5)
         os.execv(sys.executable, [sys.executable, "-m", "src.main"])
 
@@ -354,14 +365,14 @@ def setup_handlers(
         assert message.from_user
         project_dir = Path(__file__).resolve().parent.parent.parent
         try:
-            result = subprocess.run(
-                ["git", "pull"],
+            proc = await asyncio.create_subprocess_exec(
+                "git", "pull",
                 cwd=str(project_dir),
-                capture_output=True,
-                text=True,
-                timeout=30,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            output = result.stdout.strip() or result.stderr.strip() or "(no output)"
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            output = (stdout or stderr or b"").decode("utf-8", errors="replace").strip() or "(no output)"
             await message.answer(f"`{output}`\n\nRestarting...", parse_mode="Markdown")
         except Exception as e:
             await message.answer(f"Git pull failed: {e}")
@@ -401,21 +412,32 @@ def setup_handlers(
     async def cmd_local(message: Message) -> None:
         """List Claude Code sessions from the local machine."""
         assert message.from_user
-        claude_dir = Path.home() / ".claude" / "projects"
-        if not claude_dir.exists():
+        if not CLAUDE_PROJECTS_DIR.exists():
             await message.answer("No local Claude sessions found.")
             return
 
-        sessions_found: list[tuple[str, str, str, float]] = []  # (id, project, preview, mtime)
-
-        for project_dir in claude_dir.iterdir():
+        # Collect (path, mtime) first, sort globally, open only top 10
+        all_files: list[tuple[Path, float]] = []
+        for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
             if not project_dir.is_dir():
                 continue
-            project_name = project_dir.name.replace("-", "/", 1).replace("-", "/", 1)
-            for jsonl in sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+            for jsonl in project_dir.glob("*.jsonl"):
+                try:
+                    all_files.append((jsonl, jsonl.stat().st_mtime))
+                except OSError:
+                    continue
+
+        if not all_files:
+            await message.answer("No local Claude sessions found.")
+            return
+
+        all_files.sort(key=lambda x: x[1], reverse=True)
+        top_files = all_files[:10]
+
+        def _read_previews() -> list[tuple[str, str, float]]:
+            results = []
+            for jsonl, mtime in top_files:
                 session_id = jsonl.stem
-                mtime = jsonl.stat().st_mtime
-                # Read first user message as preview
                 preview = ""
                 try:
                     with open(jsonl, "r", encoding="utf-8") as f:
@@ -423,28 +445,17 @@ def setup_handlers(
                             event = json.loads(raw_line)
                             if event.get("type") == "user":
                                 content = event.get("message", {}).get("content", "")
-                                if isinstance(content, str):
-                                    preview = content[:60]
-                                elif isinstance(content, list):
-                                    for block in content:
-                                        if isinstance(block, dict) and block.get("type") == "text":
-                                            preview = block.get("text", "")[:60]
-                                            break
+                                preview = _extract_text(content)[:60]
                                 break
                 except Exception:
                     pass
-                sessions_found.append((session_id, project_name, preview, mtime))
+                results.append((session_id, preview, mtime))
+            return results
 
-        if not sessions_found:
-            await message.answer("No local Claude sessions found.")
-            return
-
-        # Sort by mtime descending, take top 10
-        sessions_found.sort(key=lambda x: x[3], reverse=True)
-        sessions_found = sessions_found[:10]
+        sessions_found = await asyncio.to_thread(_read_previews)
 
         buttons = []
-        for sid, project, preview, mtime in sessions_found:
+        for sid, preview, mtime in sessions_found:
             dt = datetime.fromtimestamp(mtime).strftime("%m/%d %H:%M")
             label = f"[{dt}] {preview or '(empty)'}".rstrip()
             if len(label) > 40:
@@ -459,9 +470,7 @@ def setup_handlers(
 
     def _peek_session(session_id: str) -> str:
         """Read last few user/assistant messages from a local session JSONL."""
-        claude_dir = Path.home() / ".claude" / "projects"
-        # Find the JSONL file
-        for project_dir in claude_dir.iterdir():
+        for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
             if not project_dir.is_dir():
                 continue
             jsonl = project_dir / f"{session_id}.jsonl"
@@ -471,7 +480,7 @@ def setup_handlers(
 
     def _extract_recent_messages(jsonl: Path, max_msgs: int = 6) -> str:
         """Extract recent user/assistant text messages from JSONL."""
-        messages: list[tuple[str, str]] = []  # (role, text)
+        messages: deque[tuple[str, str]] = deque(maxlen=max_msgs)
         try:
             with open(jsonl, "r", encoding="utf-8") as f:
                 for raw_line in f:
@@ -486,8 +495,7 @@ def setup_handlers(
                         if text:
                             messages.append(("You", text))
                     elif etype == "assistant":
-                        msg = event.get("message", {})
-                        content = msg.get("content", [])
+                        content = event.get("message", {}).get("content", [])
                         text = _extract_text(content)
                         if text:
                             messages.append(("Claude", text))
@@ -497,32 +505,19 @@ def setup_handlers(
         if not messages:
             return "(empty session)"
 
-        recent = messages[-max_msgs:]
         lines = []
-        for role, text in recent:
+        for role, text in messages:
             preview = text[:150].replace("\n", " ")
             if len(text) > 150:
                 preview += "..."
             lines.append(f"**{role}**: {preview}")
         return "\n\n".join(lines)
 
-    def _extract_text(content: object) -> str:
-        if isinstance(content, str):
-            return content.strip()
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-            return "\n".join(parts).strip()
-        return ""
-
     @r.callback_query(F.data.startswith("peek:"))
     async def cb_peek(callback: CallbackQuery) -> None:
         assert callback.from_user and callback.data
         session_id = callback.data.split(":", 1)[1]
-        preview = _peek_session(session_id)
-        # Send as a new message (too long for callback answer)
+        preview = await asyncio.to_thread(_peek_session, session_id)
         if callback.message:
             try:
                 await callback.message.answer(preview, parse_mode="Markdown")
@@ -565,7 +560,7 @@ def setup_handlers(
     async def handle_photo(message: Message) -> None:
         assert message.from_user and message.bot
         user_id = message.from_user.id
-        photo = message.photo[-1]  # largest size
+        photo = message.photo[-1]
 
         try:
             filepath = await _save_telegram_file(message.bot, photo.file_id, ".jpg")
