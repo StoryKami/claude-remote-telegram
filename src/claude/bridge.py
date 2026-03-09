@@ -211,15 +211,16 @@ async def _read_lines_with_timeout(
     stream: asyncio.StreamReader,
     timeout: int,
 ) -> AsyncIterator[str]:
-    deadline = asyncio.get_event_loop().time() + timeout
+    use_timeout = timeout > 0
+    deadline = asyncio.get_event_loop().time() + timeout if use_timeout else 0
     while True:
-        remaining = deadline - asyncio.get_event_loop().time()
-        if remaining <= 0:
-            raise asyncio.TimeoutError()
-        try:
+        if use_timeout:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
             line = await asyncio.wait_for(stream.readline(), timeout=remaining)
-        except asyncio.TimeoutError:
-            raise
+        else:
+            line = await stream.readline()
         if not line:
             break
         yield line.decode("utf-8", errors="replace")

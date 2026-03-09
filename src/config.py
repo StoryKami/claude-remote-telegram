@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Limits
     max_sessions_per_user: int = 10
-    cli_timeout: int = 900  # seconds (15 min)
+    cli_timeout: int = 0  # 0 = no limit
 
     # Logging
     log_level: str = "INFO"
