@@ -291,12 +291,13 @@ def setup_handlers(
             session = await session_manager.switch_session(
                 callback.from_user.id, session_id
             )
+            text = f"Active session: {session.name} ({session.id})"
             await callback.answer(f"Switched to: {session.name}")
             if callback.message:
-                await callback.message.edit_text(
-                    f"Active session: **{session.name}** (`{session.id}`)",
-                    parse_mode="Markdown",
-                )
+                try:
+                    await callback.message.edit_text(text)
+                except Exception:
+                    await callback.message.answer(text)
         except ValueError as e:
             await callback.answer(str(e), show_alert=True)
 
@@ -547,12 +548,14 @@ def setup_handlers(
         session = await session_manager.get_or_create_active(user_id)
         await session_manager.set_claude_session_id(session.id, claude_session_id)
 
-        await callback.answer("Connected!")
+        short_id = claude_session_id[:12]
+        text = f"Active session: {session.name} ({short_id}...)"
+        await callback.answer(f"Connected: {session.name}")
         if callback.message:
-            await callback.message.edit_text(
-                f"Connected to local session.\n`{claude_session_id}`",
-                parse_mode="Markdown",
-            )
+            try:
+                await callback.message.edit_text(text)
+            except Exception:
+                await callback.message.answer(text)
 
     # Bot-managed commands
     _bot_commands = {
