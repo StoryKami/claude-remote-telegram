@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     db_path: str = "data/sessions.db"
 
     # Limits
-    max_sessions_per_user: int = 10
+    max_sessions_per_user: int = 50
     cli_timeout: int = 0  # 0 = no limit
 
     # Logging
