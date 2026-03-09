@@ -133,6 +133,7 @@ def setup_handlers(
         accumulated_thinking = ""
         thinking_sent = False
         last_tool_status = ""
+        steps: list[str] = []  # track completed steps
 
         thinking_task = asyncio.create_task(
             _animate_thinking(status_msg, mode_label, start_time, hint)
@@ -166,7 +167,6 @@ def setup_handlers(
                         last_edit = now
 
                 elif event.type == "text":
-                    # Send thinking summary as separate message when thinking ends
                     if accumulated_thinking and not thinking_sent:
                         thinking_sent = True
                         summary = accumulated_thinking[-500:].replace("\n", " ").strip()
@@ -182,8 +182,10 @@ def setup_handlers(
                         preview = accumulated_text[-3500:]
                         if len(accumulated_text) > 3500:
                             preview = "...\n" + preview
+                        step_log = "\n".join(f"  ✓ {s}" for s in steps[-3:])
+                        footer = f"\n\n{step_log}\n✍️ Writing... ({elapsed}s)" if step_log else f"\n\n✍️ Writing... ({elapsed}s)"
                         await _safe_edit(
-                            status_msg, f"{preview or '...'}\n\n({elapsed}s)"
+                            status_msg, f"{preview or '...'}{footer}"
                         )
                         last_edit = now
 
@@ -198,14 +200,16 @@ def setup_handlers(
                         except Exception:
                             pass
                     last_tool_status = event.data
-                    await _safe_edit(
-                        status_msg, f"⏳ {event.data} ({elapsed}s)"
-                    )
+                    step_log = "\n".join(f"  ✓ {s}" for s in steps[-3:])
+                    status = f"⏳ {event.data} ({elapsed}s)"
+                    if step_log:
+                        status = f"{step_log}\n{status}"
+                    await _safe_edit(status_msg, status)
 
                 elif event.type == "tool_result":
-                    await _safe_edit(
-                        status_msg, f"✓ {last_tool_status} ({elapsed}s)"
-                    )
+                    steps.append(last_tool_status)
+                    step_log = "\n".join(f"  ✓ {s}" for s in steps[-4:])
+                    await _safe_edit(status_msg, f"{step_log}\n({elapsed}s)")
 
                 elif event.type == "error":
                     await status_msg.edit_text(f"Error: {event.data[:4000]}")
