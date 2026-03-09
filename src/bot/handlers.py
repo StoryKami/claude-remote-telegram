@@ -453,7 +453,11 @@ def setup_handlers(
             return
         try:
             await session_manager.delete_session(message.from_user.id, session_id)
-            await message.answer(f"Deleted session: `{session_id}`", parse_mode="Markdown")
+            # Clean up in-memory state
+            _session_locks.pop(session_id, None)
+            _cancel_flags.pop(session_id, None)
+            _message_queues.pop(session_id, None)
+            await message.answer(f"Deleted session: {session_id}")
         except ValueError as e:
             await message.answer(str(e))
 
@@ -747,7 +751,6 @@ def setup_handlers(
     @r.message(F.photo)
     async def handle_photo(message: Message) -> None:
         assert message.from_user and message.bot
-        user_id = message.from_user.id
         photo = message.photo[-1]
 
         try:
@@ -758,12 +761,14 @@ def setup_handlers(
 
         caption = message.caption or "Please analyze this image."
         prompt = f"I'm sharing an image. View it at: {filepath}\n\n{caption}"
-        await _process_with_queue(message, prompt)
+        try:
+            await _process_with_queue(message, prompt)
+        finally:
+            filepath.unlink(missing_ok=True)
 
     @r.message(F.document)
     async def handle_document(message: Message) -> None:
         assert message.from_user and message.bot and message.document
-        user_id = message.from_user.id
         doc = message.document
         filename = doc.file_name or "file"
         ext = Path(filename).suffix or ".bin"
@@ -776,7 +781,10 @@ def setup_handlers(
 
         caption = message.caption or f"Please analyze this file: {filename}"
         prompt = f"I'm sharing a file ({filename}). Read it at: {filepath}\n\n{caption}"
-        await _process_with_queue(message, prompt)
+        try:
+            await _process_with_queue(message, prompt)
+        finally:
+            filepath.unlink(missing_ok=True)
 
     @r.message(F.text)
     async def handle_message(message: Message) -> None:

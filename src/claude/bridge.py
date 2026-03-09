@@ -99,25 +99,39 @@ class ClaudeBridge:
                     yield parsed
 
         except asyncio.TimeoutError:
-            process.kill()
             yield StreamEvent("error", f"CLI timed out after {self._timeout}s")
+            return
+        except GeneratorExit:
+            # Generator abandoned (e.g. /cancel) — clean up subprocess
             return
         except Exception as e:
             logger.exception("Bridge error")
             yield StreamEvent("error", str(e))
             return
-
-        # Wait for process to finish
-        await process.wait()
-
-        if process.returncode != 0 and not accumulated_text:
-            stderr = ""
+        else:
+            # Happy path — wait for process and check exit code
+            await process.wait()
+            if process.returncode != 0 and not accumulated_text:
+                stderr = ""
+                if process.stderr:
+                    stderr_bytes = await process.stderr.read()
+                    stderr = stderr_bytes.decode("utf-8", errors="replace")
+                yield StreamEvent("error", f"CLI exited with code {process.returncode}: {stderr[:500]}")
+            yield StreamEvent("done", accumulated_text, session_id=result_session_id)
+        finally:
+            # Always ensure subprocess is cleaned up
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+            # Drain stderr to release pipe
             if process.stderr:
-                stderr_bytes = await process.stderr.read()
-                stderr = stderr_bytes.decode("utf-8", errors="replace")
-            yield StreamEvent("error", f"CLI exited with code {process.returncode}: {stderr[:500]}")
-
-        yield StreamEvent("done", accumulated_text, session_id=result_session_id)
+                try:
+                    await process.stderr.read()
+                except Exception:
+                    pass
 
 
 def _parse_event(event: dict) -> StreamEvent | None:
