@@ -135,6 +135,14 @@ def _parse_event(event: dict) -> StreamEvent | None:
             tool_input = tool.get("input", {}) if isinstance(tool, dict) else {}
             desc = _describe_tool(name, tool_input)
             return StreamEvent("tool_use", desc)
+        # Check for thinking in message content
+        msg = event.get("message", {})
+        if isinstance(msg, dict):
+            for block in msg.get("content", []):
+                if isinstance(block, dict) and block.get("type") == "thinking":
+                    thinking = block.get("thinking", "")
+                    if thinking:
+                        return StreamEvent("thinking", thinking)
 
     # tool result events
     if event_type == "tool":
@@ -152,6 +160,8 @@ def _parse_event(event: dict) -> StreamEvent | None:
         delta = event.get("delta", {})
         if delta.get("type") == "text_delta":
             return StreamEvent("text", delta.get("text", ""))
+        if delta.get("type") == "thinking_delta":
+            return StreamEvent("thinking", delta.get("thinking", ""))
 
     # result event
     if event_type == "result":

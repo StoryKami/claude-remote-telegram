@@ -144,12 +144,25 @@ def setup_handlers(
                 if _cancel_flags.get(user_id):
                     raise asyncio.CancelledError()
 
-                if not thinking_task.done():
+                # Stop spinner on first non-thinking event
+                if event.type != "thinking" and not thinking_task.done():
                     thinking_task.cancel()
 
                 elapsed = int(time.monotonic() - start_time)
 
-                if event.type == "text":
+                if event.type == "thinking":
+                    now = time.monotonic()
+                    if now - last_edit >= 2.0:
+                        snippet = event.data[-120:].replace("\n", " ").strip()
+                        if not snippet:
+                            continue
+                        await _safe_edit(
+                            status_msg,
+                            f"💭 ({elapsed}s)\n{snippet}",
+                        )
+                        last_edit = now
+
+                elif event.type == "text":
                     accumulated_text += event.data
                     now = time.monotonic()
                     if now - last_edit >= 2.5:
