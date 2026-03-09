@@ -97,16 +97,20 @@ def setup_handlers(
 
         FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-        def __init__(self, status_msg: Message, start: float) -> None:
+        def __init__(self, status_msg: Message, session_id: str, start: float) -> None:
             self.msg = status_msg
+            self.session_id = session_id
             self.start = start
             self.phase = "Thinking..."
             self.hint = ""
-            self.last_text = ""  # Claude's latest text utterance
+            self.last_text = ""
             self.current_tool = ""
             self.steps: list[tuple[str, int]] = []
             self._frame_idx = 0
             self._last_rendered = ""
+            self._stop_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="■ Stop", callback_data=f"stop:{session_id}"),
+            ]])
 
         def elapsed(self) -> int:
             return int(time.monotonic() - self.start)
@@ -116,22 +120,16 @@ def setup_handlers(
             spinner = self.FRAMES[self._frame_idx % len(self.FRAMES)]
             self._frame_idx += 1
 
-            # Header: spinner + phase + time
             header = f"{spinner} {self.phase} ({e}s)"
-
-            # Sections
             parts = [header]
 
-            # Hint (prompt preview)
             if self.hint and not self.steps and not self.last_text:
                 parts.append(f"\n&gt; {self.hint}")
 
-            # Claude's last text utterance
             if self.last_text:
                 preview = self.last_text[-200:].replace("<", "&lt;").replace(">", "&gt;")
                 parts.append(f"\n💬 {preview}")
 
-            # Tool steps log
             if self.steps or self.current_tool:
                 log_lines = [f"✓ {name} ({t}s)" for name, t in self.steps[-6:]]
                 if self.current_tool:
@@ -146,7 +144,7 @@ def setup_handlers(
                 return
             self._last_rendered = html
             try:
-                await self.msg.edit_text(html, parse_mode="HTML")
+                await self.msg.edit_text(html, parse_mode="HTML", reply_markup=self._stop_kb)
             except Exception:
                 pass
 
@@ -178,7 +176,7 @@ def setup_handlers(
         start_time = time.monotonic()
         status_msg = await message.answer("⠋ Thinking... (0s)", parse_mode="HTML")
 
-        tracker = _StatusTracker(status_msg, start_time)
+        tracker = _StatusTracker(status_msg, session.id, start_time)
         tracker.hint = hint
         if mode != "code":
             tracker.phase = f"[{mode}] Thinking..."
@@ -259,6 +257,7 @@ def setup_handlers(
                 await status_msg.edit_text(
                     f'<blockquote expandable>{log_html}</blockquote>',
                     parse_mode="HTML",
+                    reply_markup=None,
                 )
             except Exception:
                 try:
@@ -714,6 +713,16 @@ def setup_handlers(
             return False
         cmd = text.split()[0].lstrip("/").split("@")[0]
         return cmd in _bot_commands
+
+    # --- Interrupt button ---
+
+    @r.callback_query(F.data.startswith("stop:"))
+    async def cb_stop(callback: CallbackQuery) -> None:
+        assert callback.from_user and callback.data
+        session_id = callback.data.split(":", 1)[1]
+        _cancel_flags[session_id] = True
+        _message_queues.pop(session_id, None)
+        await callback.answer("Stopping...")
 
     # --- Topic lifecycle ---
 
