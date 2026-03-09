@@ -256,14 +256,34 @@ def setup_handlers(
             await status_msg.edit_text("(no response)")
             return
 
+        # Build process log as expandable summary above the response
+        total_elapsed = int(time.monotonic() - start_time)
+        log_lines: list[str] = []
+        if accumulated_thinking:
+            thinking_preview = accumulated_thinking[-300:].replace("\n", " ").strip()
+            if len(accumulated_thinking) > 300:
+                thinking_preview = "..." + thinking_preview
+            log_lines.append(f"💭 {thinking_preview}")
+            log_lines.append("")
+        for step_name, step_time in steps:
+            log_lines.append(f"✓ {step_name} ({step_time}s)")
+        log_lines.append(f"\n⏱ {total_elapsed}s")
+
+        if log_lines:
+            log_html = "\n".join(log_lines)
+            try:
+                await status_msg.edit_text(
+                    f'<blockquote expandable>{log_html}</blockquote>',
+                    parse_mode="HTML",
+                )
+            except Exception:
+                try:
+                    await status_msg.delete()
+                except Exception:
+                    pass
+
         chunks = format_telegram_message(accumulated_text)
-
-        try:
-            await status_msg.edit_text(chunks[0])
-        except Exception:
-            await message.answer(chunks[0])
-
-        for chunk in chunks[1:]:
+        for chunk in chunks:
             await message.answer(chunk)
 
     async def _process_with_queue(
