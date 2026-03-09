@@ -640,21 +640,46 @@ def setup_handlers(
 
     @r.callback_query(F.data.startswith("local:"))
     async def cb_local(callback: CallbackQuery) -> None:
-        assert callback.from_user and callback.data
+        assert callback.from_user and callback.data and callback.message
         claude_session_id = callback.data.split(":", 1)[1]
         user_id = callback.from_user.id
+        chat = callback.message.chat
+        short_id = claude_session_id[:12]
+        name = f"local-{short_id}"
 
+        # In forum group: create a new topic for this local session
+        if chat.is_forum and callback.message.bot:
+            try:
+                topic = await callback.message.bot.create_forum_topic(chat.id, name)
+                session = await session_manager.create_session(
+                    user_id, name, topic_id=topic.message_thread_id,
+                )
+                await session_manager.set_claude_session_id(session.id, claude_session_id)
+                await callback.message.bot.send_message(
+                    chat.id,
+                    f"Connected to local session: {short_id}...",
+                    message_thread_id=topic.message_thread_id,
+                )
+                await callback.answer(f"Topic created: {name}")
+                try:
+                    await callback.message.edit_text(f"Opened topic: {name}")
+                except Exception:
+                    pass
+                return
+            except Exception as e:
+                await callback.answer(f"Error: {e}", show_alert=True)
+                return
+
+        # DM: connect to active session as before
         session = await session_manager.get_or_create_active(user_id)
         await session_manager.set_claude_session_id(session.id, claude_session_id)
 
-        short_id = claude_session_id[:12]
         text = f"Active session: {session.name} ({short_id}...)"
         await callback.answer(f"Connected: {session.name}")
-        if callback.message:
-            try:
-                await callback.message.edit_text(text)
-            except Exception:
-                await callback.message.answer(text)
+        try:
+            await callback.message.edit_text(text)
+        except Exception:
+            await callback.message.answer(text)
 
     # Bot-managed commands
     _bot_commands = {
