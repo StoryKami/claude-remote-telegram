@@ -110,16 +110,22 @@ def setup_handlers(
         current: str,
         steps: list[tuple[str, int]],
         elapsed: int,
+        thinking_hint: str = "",
     ) -> str:
         """Build status message with expandable step history."""
         header = f"{current} ({elapsed}s)"
-        if not steps:
+        details: list[str] = []
+        if thinking_hint:
+            details.append(f"💭 {thinking_hint}")
+            details.append("")
+        for name, t in steps:
+            details.append(f"✓ {name} ({t}s)")
+        if not details:
             return header
-        detail_lines = [f"✓ {name} ({t}s)" for name, t in steps]
-        detail = "\n".join(detail_lines)
+        details.append(f"\nElapsed: {elapsed}s")
         return (
             f"{header}\n"
-            f"<blockquote expandable>{detail}\n\nElapsed: {elapsed}s</blockquote>"
+            f'<blockquote expandable>{chr(10).join(details)}</blockquote>'
         )
 
     async def _safe_edit_html(msg: Message, html: str) -> None:
@@ -189,23 +195,16 @@ def setup_handlers(
                 elif event.type == "text":
                     if accumulated_thinking and not thinking_sent:
                         thinking_sent = True
-                        summary = accumulated_thinking[-500:].replace("\n", " ").strip()
-                        if len(accumulated_thinking) > 500:
-                            summary = "..." + summary
-                        try:
-                            await message.answer(f"💭 {summary}")
-                        except Exception:
-                            pass
                     accumulated_text += event.data
                     now = time.monotonic()
                     if now - last_edit >= 2.5:
                         preview = accumulated_text[-3000:]
                         if len(accumulated_text) > 3000:
                             preview = "...\n" + preview
+                        thinking_hint = accumulated_thinking[-150:].replace("\n", " ").strip() if accumulated_thinking else ""
                         html = _build_status_html(
-                            "✍️ Writing...", steps, elapsed,
+                            "✍️ Writing", steps, elapsed, thinking_hint,
                         )
-                        # preview + expandable details
                         await _safe_edit_html(
                             status_msg, f"{preview}\n\n{html}"
                         )
@@ -214,23 +213,18 @@ def setup_handlers(
                 elif event.type == "tool_use":
                     if accumulated_thinking and not thinking_sent:
                         thinking_sent = True
-                        summary = accumulated_thinking[-500:].replace("\n", " ").strip()
-                        if len(accumulated_thinking) > 500:
-                            summary = "..." + summary
-                        try:
-                            await message.answer(f"💭 {summary}")
-                        except Exception:
-                            pass
                     last_tool_status = event.data
+                    thinking_hint = accumulated_thinking[-150:].replace("\n", " ").strip() if accumulated_thinking else ""
                     html = _build_status_html(
-                        f"⏳ {event.data}", steps, elapsed,
+                        f"⏳ {event.data}", steps, elapsed, thinking_hint,
                     )
                     await _safe_edit_html(status_msg, html)
 
                 elif event.type == "tool_result":
                     steps.append((last_tool_status, elapsed))
+                    thinking_hint = accumulated_thinking[-150:].replace("\n", " ").strip() if accumulated_thinking else ""
                     html = _build_status_html(
-                        f"✓ {last_tool_status}", steps, elapsed,
+                        f"✓ {last_tool_status}", steps, elapsed, thinking_hint,
                     )
                     await _safe_edit_html(status_msg, html)
 

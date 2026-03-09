@@ -214,25 +214,59 @@ def _parse_event(event: dict) -> StreamEvent | None:
     return None
 
 
+def _short_path(path: str) -> str:
+    """Shorten a file path to just filename or last 2 segments."""
+    from pathlib import PurePosixPath, PureWindowsPath
+    try:
+        p = PureWindowsPath(path) if "\\" in path else PurePosixPath(path)
+        parts = p.parts
+        if len(parts) <= 2:
+            return str(p)
+        return str(PurePosixPath(*parts[-2:]))
+    except Exception:
+        return path
+
+
+def _short_bash(cmd: str) -> str:
+    """Extract the meaningful part of a bash command."""
+    # Strip wsl/ssh wrappers to show the inner command
+    for prefix in ['wsl -d Ubuntu -e bash -c "', "wsl -d Ubuntu -e bash -c '"]:
+        if cmd.startswith(prefix):
+            cmd = cmd[len(prefix):].rstrip("\"'")
+    # Strip ssh wrapper
+    if "ssh " in cmd and "bash -c" in cmd:
+        idx = cmd.find("bash -c")
+        if idx >= 0:
+            cmd = cmd[idx + 7:].strip().strip("\"'\\")
+    if len(cmd) > 40:
+        cmd = cmd[:37] + "..."
+    return cmd
+
+
 def _describe_tool(name: str, params: dict) -> str:
     match name:
         case "Bash" | "bash":
-            cmd = str(params.get("command", ""))[:60]
-            return f"[bash] {cmd}"
+            cmd = _short_bash(str(params.get("command", "")))
+            return f"bash: {cmd}"
         case "Read" | "read_file":
-            return f"[read] {params.get('file_path', params.get('path', '?'))}"
+            path = _short_path(params.get("file_path", params.get("path", "?")))
+            return f"read: {path}"
         case "Write" | "write_file":
-            return f"[write] {params.get('file_path', params.get('path', '?'))}"
+            path = _short_path(params.get("file_path", params.get("path", "?")))
+            return f"write: {path}"
         case "Edit":
-            return f"[edit] {params.get('file_path', '?')}"
+            path = _short_path(params.get("file_path", "?"))
+            return f"edit: {path}"
         case "Glob":
-            return f"[glob] {params.get('pattern', '?')}"
+            return f"glob: {params.get('pattern', '?')}"
         case "Grep":
-            return f"[grep] {params.get('pattern', '?')}"
+            return f"grep: {params.get('pattern', '?')}"
         case "Agent":
-            return f"[agent] {params.get('description', '?')}"
+            return f"agent: {params.get('description', '?')}"
+        case "WebSearch":
+            return f"search: {params.get('query', '?')[:40]}"
         case _:
-            return f"[{name}]"
+            return name.lower()
 
 
 async def _read_lines_with_timeout(
