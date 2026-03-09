@@ -23,11 +23,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_topic_id ON sessions(topic_id);
-"""
-
-MIGRATION = """
-ALTER TABLE sessions ADD COLUMN topic_id INTEGER;
 """
 
 
@@ -40,13 +35,26 @@ class SessionRepository:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._db_path))
         self._db.row_factory = aiosqlite.Row
+
+        # Migrate first: add topic_id column if missing
+        try:
+            await self._db.execute("ALTER TABLE sessions ADD COLUMN topic_id INTEGER")
+            await self._db.commit()
+        except Exception:
+            pass  # column already exists or table doesn't exist yet
+
         await self._db.executescript(SCHEMA)
         await self._db.execute("PRAGMA journal_mode=WAL")
-        # Migrate: add topic_id if missing
+
+        # Create topic index (safe now that column exists)
         try:
-            await self._db.executescript(MIGRATION)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_topic_id ON sessions(topic_id)"
+            )
+            await self._db.commit()
         except Exception:
-            pass  # column already exists
+            pass
+
         await self._db.commit()
         logger.info("Database initialized: %s", self._db_path)
 
