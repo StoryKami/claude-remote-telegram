@@ -130,6 +130,8 @@ def setup_handlers(
         status_msg = await message.answer(f"{mode_label}Thinking.\n\n> {hint}")
         last_edit = start_time
         accumulated_text = ""
+        accumulated_thinking = ""
+        thinking_sent = False
         last_tool_status = ""
 
         thinking_task = asyncio.create_task(
@@ -151,9 +153,10 @@ def setup_handlers(
                 elapsed = int(time.monotonic() - start_time)
 
                 if event.type == "thinking":
+                    accumulated_thinking += event.data
                     now = time.monotonic()
                     if now - last_edit >= 2.0:
-                        snippet = event.data[-120:].replace("\n", " ").strip()
+                        snippet = accumulated_thinking[-200:].replace("\n", " ").strip()
                         if not snippet:
                             continue
                         await _safe_edit(
@@ -163,6 +166,16 @@ def setup_handlers(
                         last_edit = now
 
                 elif event.type == "text":
+                    # Send thinking summary as separate message when thinking ends
+                    if accumulated_thinking and not thinking_sent:
+                        thinking_sent = True
+                        summary = accumulated_thinking[-500:].replace("\n", " ").strip()
+                        if len(accumulated_thinking) > 500:
+                            summary = "..." + summary
+                        try:
+                            await message.answer(f"💭 {summary}")
+                        except Exception:
+                            pass
                     accumulated_text += event.data
                     now = time.monotonic()
                     if now - last_edit >= 2.5:
@@ -175,6 +188,15 @@ def setup_handlers(
                         last_edit = now
 
                 elif event.type == "tool_use":
+                    if accumulated_thinking and not thinking_sent:
+                        thinking_sent = True
+                        summary = accumulated_thinking[-500:].replace("\n", " ").strip()
+                        if len(accumulated_thinking) > 500:
+                            summary = "..." + summary
+                        try:
+                            await message.answer(f"💭 {summary}")
+                        except Exception:
+                            pass
                     last_tool_status = event.data
                     await _safe_edit(
                         status_msg, f"⏳ {event.data} ({elapsed}s)"
