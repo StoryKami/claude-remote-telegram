@@ -135,7 +135,11 @@ def _parse_event(event: dict) -> StreamEvent | None:
             tool_input = tool.get("input", {}) if isinstance(tool, dict) else {}
             desc = _describe_tool(name, tool_input)
             return StreamEvent("tool_use", desc)
-        # Check for thinking in message content
+        # Check for thinking in message content or top-level
+        if subtype == "thinking":
+            thinking = event.get("thinking", "")
+            if thinking:
+                return StreamEvent("thinking", thinking)
         msg = event.get("message", {})
         if isinstance(msg, dict):
             for block in msg.get("content", []):
@@ -143,6 +147,7 @@ def _parse_event(event: dict) -> StreamEvent | None:
                     thinking = block.get("thinking", "")
                     if thinking:
                         return StreamEvent("thinking", thinking)
+        logger.debug("Unhandled assistant subtype=%s keys=%s", subtype, list(event.keys()))
 
     # tool result events
     if event_type == "tool":
@@ -183,6 +188,8 @@ def _parse_event(event: dict) -> StreamEvent | None:
         if texts:
             return StreamEvent("text", "\n".join(texts))
 
+    if event_type not in ("", "start", "ping"):
+        logger.debug("Unhandled event type=%s keys=%s", event_type, list(event.keys()))
     return None
 
 
