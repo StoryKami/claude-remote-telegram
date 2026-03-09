@@ -135,18 +135,35 @@ def _parse_event(event: dict) -> StreamEvent | None:
             tool_input = tool.get("input", {}) if isinstance(tool, dict) else {}
             desc = _describe_tool(name, tool_input)
             return StreamEvent("tool_use", desc)
-        # Check for thinking in message content or top-level
         if subtype == "thinking":
             thinking = event.get("thinking", "")
             if thinking:
                 return StreamEvent("thinking", thinking)
+
+        # subtype is empty — parse message.content blocks directly
         msg = event.get("message", {})
         if isinstance(msg, dict):
+            results = []
             for block in msg.get("content", []):
-                if isinstance(block, dict) and block.get("type") == "thinking":
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype == "text":
+                    text = block.get("text", "")
+                    if text:
+                        results.append(StreamEvent("text", text))
+                elif btype == "tool_use":
+                    name = block.get("name", "unknown")
+                    tool_input = block.get("input", {})
+                    desc = _describe_tool(name, tool_input)
+                    results.append(StreamEvent("tool_use", desc))
+                elif btype == "thinking":
                     thinking = block.get("thinking", "")
                     if thinking:
-                        return StreamEvent("thinking", thinking)
+                        results.append(StreamEvent("thinking", thinking))
+            # Return first meaningful event found
+            if results:
+                return results[0]
         logger.debug("Unhandled assistant subtype=%s keys=%s", subtype, list(event.keys()))
 
     # tool result events
@@ -159,6 +176,10 @@ def _parse_event(event: dict) -> StreamEvent | None:
                     block.get("text", "") for block in content if isinstance(block, dict)
                 )
             return StreamEvent("tool_result", str(content)[:200])
+
+    # user event with tool_use_result (tool completed)
+    if event_type == "user" and "tool_use_result" in event:
+        return StreamEvent("tool_result", "")
 
     # content_block_delta (alternative format)
     if event_type == "content_block_delta":
