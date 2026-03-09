@@ -567,19 +567,22 @@ def setup_handlers(
 
         sessions_found = await asyncio.to_thread(_read_previews)
 
+        # Build text list + compact buttons
+        lines = ["<b>Local Sessions</b>\n"]
         buttons = []
-        for sid, preview, mtime in sessions_found:
+        for i, (sid, preview, mtime) in enumerate(sessions_found, 1):
             dt = datetime.fromtimestamp(mtime).strftime("%m/%d %H:%M")
-            label = f"[{dt}] {preview or '(empty)'}".rstrip()
-            if len(label) > 40:
-                label = label[:37] + "..."
+            desc = preview or "(empty)"
+            if len(desc) > 60:
+                desc = desc[:57] + "..."
+            lines.append(f"<b>{i}.</b> [{dt}] {desc}")
             buttons.append([
-                InlineKeyboardButton(text=label, callback_data=f"peek:{sid}"),
-                InlineKeyboardButton(text="Connect", callback_data=f"local:{sid}"),
+                InlineKeyboardButton(text=f"{i} Peek", callback_data=f"peek:{sid}"),
+                InlineKeyboardButton(text=f"{i} Connect", callback_data=f"local:{sid}"),
             ])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await message.answer("Local Claude sessions (recent 10):\nTap to peek, [Connect] to switch.", reply_markup=keyboard)
+        await message.answer("\n".join(lines), reply_markup=keyboard, parse_mode="HTML")
 
     def _peek_session(session_id: str) -> str:
         """Read last few user/assistant messages from a local session JSONL."""
