@@ -92,48 +92,69 @@ def setup_handlers(
         await bot.download_file(file_info.file_path, str(dest))
         return dest
 
-    async def _animate_thinking(
-        status_msg: Message, mode_label: str, start: float, hint: str,
-    ) -> None:
-        """Animate thinking spinner so user knows the bot is alive."""
-        frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        i = 0
+    class _StatusTracker:
+        """Tracks and renders the status message with 1s spinner refresh."""
+
+        FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+        def __init__(self, status_msg: Message, start: float) -> None:
+            self.msg = status_msg
+            self.start = start
+            self.phase = "Thinking..."
+            self.hint = ""
+            self.last_text = ""  # Claude's latest text utterance
+            self.current_tool = ""
+            self.steps: list[tuple[str, int]] = []
+            self._frame_idx = 0
+            self._last_rendered = ""
+
+        def elapsed(self) -> int:
+            return int(time.monotonic() - self.start)
+
+        def render(self) -> str:
+            e = self.elapsed()
+            spinner = self.FRAMES[self._frame_idx % len(self.FRAMES)]
+            self._frame_idx += 1
+
+            # Header: spinner + phase + time
+            header = f"{spinner} {self.phase} ({e}s)"
+
+            # Sections
+            parts = [header]
+
+            # Hint (prompt preview)
+            if self.hint and not self.steps and not self.last_text:
+                parts.append(f"\n&gt; {self.hint}")
+
+            # Claude's last text utterance
+            if self.last_text:
+                preview = self.last_text[-200:].replace("<", "&lt;").replace(">", "&gt;")
+                parts.append(f"\n💬 {preview}")
+
+            # Tool steps log
+            if self.steps or self.current_tool:
+                log_lines = [f"✓ {name} ({t}s)" for name, t in self.steps[-6:]]
+                if self.current_tool:
+                    log_lines.append(f"⏳ {self.current_tool}")
+                parts.append(f'\n<blockquote expandable>{chr(10).join(log_lines)}</blockquote>')
+
+            return "\n".join(parts)
+
+        async def refresh(self) -> None:
+            html = self.render()
+            if html == self._last_rendered:
+                return
+            self._last_rendered = html
+            try:
+                await self.msg.edit_text(html, parse_mode="HTML")
+            except Exception:
+                pass
+
+    async def _run_status_ticker(tracker: _StatusTracker) -> None:
+        """Refresh status message every 1 second."""
         while True:
-            await asyncio.sleep(2)
-            elapsed = int(time.monotonic() - start)
-            await _safe_edit_html(
-                status_msg,
-                f"{mode_label}{frames[i % len(frames)]} Thinking... ({elapsed}s)\n\n&gt; {hint}",
-            )
-            i += 1
-
-    def _build_status_html(
-        current: str,
-        steps: list[tuple[str, int]],
-        elapsed: int,
-        thinking_hint: str = "",
-    ) -> str:
-        """Build status message with expandable step history."""
-        header = f"{current} ({elapsed}s)"
-        details: list[str] = []
-        if thinking_hint:
-            details.append(f"💭 {thinking_hint}")
-            details.append("")
-        for name, t in steps:
-            details.append(f"✓ {name} ({t}s)")
-        if not details:
-            return header
-        details.append(f"\nElapsed: {elapsed}s")
-        return (
-            f"{header}\n"
-            f'<blockquote expandable>{chr(10).join(details)}</blockquote>'
-        )
-
-    async def _safe_edit_html(msg: Message, html: str) -> None:
-        try:
-            await msg.edit_text(html, parse_mode="HTML")
-        except Exception:
-            pass
+            await asyncio.sleep(1)
+            await tracker.refresh()
 
     async def _process_prompt(
         message: Message,
@@ -149,24 +170,22 @@ def setup_handlers(
         if mode == "plan":
             prompt = PLAN_MODE_PREFIX + prompt
 
-        mode_label = f"[{mode}] " if mode != "code" else ""
         display_prompt = prompt.removeprefix(PLAN_MODE_PREFIX)
-        hint = display_prompt[:80].replace("\n", " ")
+        hint = display_prompt[:80].replace("\n", " ").replace("<", "&lt;").replace(">", "&gt;")
         if len(display_prompt) > 80:
             hint += "..."
 
         start_time = time.monotonic()
-        status_msg = await message.answer(f"{mode_label}Thinking.\n\n&gt; {hint}", parse_mode="HTML")
-        last_edit = start_time
+        status_msg = await message.answer("⠋ Thinking... (0s)", parse_mode="HTML")
+
+        tracker = _StatusTracker(status_msg, start_time)
+        tracker.hint = hint
+        if mode != "code":
+            tracker.phase = f"[{mode}] Thinking..."
+
+        ticker_task = asyncio.create_task(_run_status_ticker(tracker))
         accumulated_text = ""
         accumulated_thinking = ""
-        thinking_sent = False
-        last_tool_status = ""
-        steps: list[tuple[str, int]] = []  # (description, elapsed_seconds)
-
-        thinking_task = asyncio.create_task(
-            _animate_thinking(status_msg, mode_label, start_time, hint)
-        )
 
         try:
             async for event in bridge.send_message(
@@ -176,61 +195,25 @@ def setup_handlers(
                 if _cancel_flags.get(session.id):
                     raise asyncio.CancelledError()
 
-                if event.type != "thinking" and not thinking_task.done():
-                    thinking_task.cancel()
-
-                elapsed = int(time.monotonic() - start_time)
-
                 if event.type == "thinking":
                     accumulated_thinking += event.data
-                    now = time.monotonic()
-                    if now - last_edit >= 2.0:
-                        snippet = accumulated_thinking[-200:].replace("\n", " ").strip()
-                        if not snippet:
-                            continue
-                        await _safe_edit(
-                            status_msg,
-                            f"💭 ({elapsed}s)\n{snippet}",
-                        )
-                        last_edit = now
 
                 elif event.type == "text":
-                    if accumulated_thinking and not thinking_sent:
-                        thinking_sent = True
                     accumulated_text += event.data
-                    now = time.monotonic()
-                    if now - last_edit >= 2.5:
-                        preview = accumulated_text[-3000:]
-                        if len(accumulated_text) > 3000:
-                            preview = "...\n" + preview
-                        thinking_hint = accumulated_thinking[-150:].replace("\n", " ").strip() if accumulated_thinking else ""
-                        html = _build_status_html(
-                            "✍️ Writing", steps, elapsed, thinking_hint,
-                        )
-                        await _safe_edit_html(
-                            status_msg, f"{preview}\n\n{html}"
-                        )
-                        last_edit = now
+                    tracker.phase = "Writing..."
+                    # Show latest text snippet as Claude's utterance
+                    tracker.last_text = accumulated_text[-200:]
 
                 elif event.type == "tool_use":
-                    if accumulated_thinking and not thinking_sent:
-                        thinking_sent = True
-                    last_tool_status = event.data
-                    thinking_hint = accumulated_thinking[-150:].replace("\n", " ").strip() if accumulated_thinking else ""
-                    html = _build_status_html(
-                        f"⏳ {event.data}", steps, elapsed, thinking_hint,
-                    )
-                    await _safe_edit_html(status_msg, html)
+                    tracker.phase = "Working..."
+                    tracker.current_tool = event.data
 
                 elif event.type == "tool_result":
-                    steps.append((last_tool_status, elapsed))
-                    thinking_hint = accumulated_thinking[-150:].replace("\n", " ").strip() if accumulated_thinking else ""
-                    html = _build_status_html(
-                        f"✓ {last_tool_status}", steps, elapsed, thinking_hint,
-                    )
-                    await _safe_edit_html(status_msg, html)
+                    tracker.steps.append((tracker.current_tool or "?", tracker.elapsed()))
+                    tracker.current_tool = ""
 
                 elif event.type == "error":
+                    ticker_task.cancel()
                     await status_msg.edit_text(f"Error: {event.data[:4000]}")
                     return
 
@@ -251,15 +234,14 @@ def setup_handlers(
             await status_msg.edit_text(f"Error: {e}")
             return
         finally:
-            if not thinking_task.done():
-                thinking_task.cancel()
+            ticker_task.cancel()
 
         if not accumulated_text:
             await status_msg.edit_text("(no response)")
             return
 
         # Build process log as expandable summary above the response
-        total_elapsed = int(time.monotonic() - start_time)
+        total_elapsed = tracker.elapsed()
         log_lines: list[str] = []
         if accumulated_thinking:
             thinking_preview = accumulated_thinking[-300:].replace("\n", " ").strip()
@@ -267,7 +249,7 @@ def setup_handlers(
                 thinking_preview = "..." + thinking_preview
             log_lines.append(f"💭 {thinking_preview}")
             log_lines.append("")
-        for step_name, step_time in steps:
+        for step_name, step_time in tracker.steps:
             log_lines.append(f"✓ {step_name} ({step_time}s)")
         log_lines.append(f"\n⏱ {total_elapsed}s")
 
