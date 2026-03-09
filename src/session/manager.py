@@ -24,7 +24,12 @@ class SessionManager:
             return session
         return await self.create_session(user_id, "default")
 
-    async def create_session(self, user_id: int, name: str) -> Session:
+    async def get_session_by_topic(self, topic_id: int) -> Session | None:
+        return await self._repo.get_session_by_topic(topic_id)
+
+    async def create_session(
+        self, user_id: int, name: str, topic_id: int | None = None,
+    ) -> Session:
         count = await self._repo.count_user_sessions(user_id)
         if count >= self._max_sessions:
             raise ValueError(
@@ -40,11 +45,12 @@ class SessionManager:
             name=name,
             claude_session_id=None,
             is_active=True,
+            topic_id=topic_id,
             created_at=now,
             updated_at=now,
         )
         await self._repo.create_session(session)
-        logger.info("Created session: %s for user %d", session.id, user_id)
+        logger.info("Created session: %s for user %d (topic=%s)", session.id, user_id, topic_id)
         return session
 
     async def switch_session(self, user_id: int, session_id: str) -> Session:

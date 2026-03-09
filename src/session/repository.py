@@ -17,11 +17,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     name TEXT NOT NULL,
     claude_session_id TEXT,
     is_active INTEGER DEFAULT 1,
+    topic_id INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_topic_id ON sessions(topic_id);
+"""
+
+MIGRATION = """
+ALTER TABLE sessions ADD COLUMN topic_id INTEGER;
 """
 
 
@@ -36,6 +42,11 @@ class SessionRepository:
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(SCHEMA)
         await self._db.execute("PRAGMA journal_mode=WAL")
+        # Migrate: add topic_id if missing
+        try:
+            await self._db.executescript(MIGRATION)
+        except Exception:
+            pass  # column already exists
         await self._db.commit()
         logger.info("Database initialized: %s", self._db_path)
 
@@ -47,14 +58,15 @@ class SessionRepository:
     async def create_session(self, session: Session) -> None:
         assert self._db
         await self._db.execute(
-            "INSERT INTO sessions (id, user_id, name, claude_session_id, is_active, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sessions (id, user_id, name, claude_session_id, is_active, topic_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session.id,
                 session.user_id,
                 session.name,
                 session.claude_session_id,
                 int(session.is_active),
+                session.topic_id,
                 session.created_at.isoformat(),
                 session.updated_at.isoformat(),
             ),
@@ -64,6 +76,15 @@ class SessionRepository:
     async def get_session(self, session_id: str) -> Session | None:
         assert self._db
         cursor = await self._db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        row = await cursor.fetchone()
+        return _row_to_session(row) if row else None
+
+    async def get_session_by_topic(self, topic_id: int) -> Session | None:
+        assert self._db
+        cursor = await self._db.execute(
+            "SELECT * FROM sessions WHERE topic_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (topic_id,),
+        )
         row = await cursor.fetchone()
         return _row_to_session(row) if row else None
 
@@ -126,6 +147,7 @@ def _row_to_session(row: aiosqlite.Row) -> Session:
         name=row["name"],
         claude_session_id=row["claude_session_id"],
         is_active=bool(row["is_active"]),
+        topic_id=row["topic_id"] if "topic_id" in row.keys() else None,
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )

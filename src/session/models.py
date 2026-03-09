@@ -11,5 +11,6 @@ class Session:
     name: str
     claude_session_id: str | None  # Claude CLI session ID
     is_active: bool
+    topic_id: int | None  # Telegram forum topic ID
     created_at: datetime
     updated_at: datetime

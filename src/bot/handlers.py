@@ -32,11 +32,12 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# Per-session state (keyed by session ID)
+_session_locks: dict[str, asyncio.Lock] = {}
+_cancel_flags: dict[str, bool] = {}
+_message_queues: dict[str, deque[tuple[Message, str]]] = {}
 # Per-user state
-_user_locks: dict[int, asyncio.Lock] = {}
-_cancel_flags: dict[int, bool] = {}
 _user_modes: dict[int, str] = {}
-_message_queues: dict[int, deque[tuple[Message, str]]] = {}
 
 PLAN_MODE_PREFIX = (
     "[PLAN MODE] You are in plan mode. Do NOT edit, write, or create any files. "
@@ -46,8 +47,8 @@ PLAN_MODE_PREFIX = (
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 
 
-def _get_lock(user_id: int) -> asyncio.Lock:
-    return _user_locks.setdefault(user_id, asyncio.Lock())
+def _get_session_lock(session_id: str) -> asyncio.Lock:
+    return _session_locks.setdefault(session_id, asyncio.Lock())
 
 
 def _extract_text(content: object) -> str:
@@ -136,12 +137,13 @@ def setup_handlers(
 
     async def _process_prompt(
         message: Message,
-        user_id: int,
+        session: "Session",
         prompt: str,
     ) -> None:
         """Process a single prompt through Claude bridge."""
-        _cancel_flags[user_id] = False
-        session = await session_manager.get_or_create_active(user_id)
+        from src.session.models import Session  # noqa: F811
+        _cancel_flags[session.id] = False
+        user_id = session.user_id
         mode = _user_modes.get(user_id, "code")
 
         if mode == "plan":
@@ -171,7 +173,7 @@ def setup_handlers(
                 prompt=prompt,
                 claude_session_id=session.claude_session_id,
             ):
-                if _cancel_flags.get(user_id):
+                if _cancel_flags.get(session.id):
                     raise asyncio.CancelledError()
 
                 if event.type != "thinking" and not thinking_task.done():
@@ -286,23 +288,44 @@ def setup_handlers(
         for chunk in chunks:
             await message.answer(chunk)
 
+    async def _resolve_session(message: Message) -> "Session":
+        """Resolve session from topic (group) or active session (DM)."""
+        from src.session.models import Session  # noqa: F811
+        assert message.from_user
+        user_id = message.from_user.id
+        topic_id = message.message_thread_id
+
+        # In a forum group, route by topic
+        if topic_id:
+            session = await session_manager.get_session_by_topic(topic_id)
+            if session:
+                return session
+            # Auto-create session for this topic
+            return await session_manager.create_session(user_id, f"topic-{topic_id}", topic_id)
+
+        # DM: use active session
+        return await session_manager.get_or_create_active(user_id)
+
     async def _process_with_queue(
-        message: Message, user_id: int, prompt: str,
+        message: Message, prompt: str,
     ) -> None:
-        """Process prompt with per-user lock and message queue."""
-        lock = _get_lock(user_id)
+        """Process prompt with per-session lock and message queue."""
+        session = await _resolve_session(message)
+        lock = _get_session_lock(session.id)
         if lock.locked():
-            queue = _message_queues.setdefault(user_id, deque())
+            queue = _message_queues.setdefault(session.id, deque())
             queue.append((message, prompt))
             await message.answer(f"Queued (#{len(queue)}). Will process after current task.")
             return
 
         async with lock:
-            await _process_prompt(message, user_id, prompt)
-            while _message_queues.get(user_id):
-                queued_msg, queued_prompt = _message_queues[user_id].popleft()
-                _cancel_flags[user_id] = False
-                await _process_prompt(queued_msg, user_id, queued_prompt)
+            await _process_prompt(message, session, prompt)
+            while _message_queues.get(session.id):
+                queued_msg, queued_prompt = _message_queues[session.id].popleft()
+                _cancel_flags[session.id] = False
+                # Re-resolve in case session was updated
+                session = await _resolve_session(queued_msg)
+                await _process_prompt(queued_msg, session, queued_prompt)
 
     # --- Bot commands ---
 
@@ -316,14 +339,26 @@ def setup_handlers(
 
     @r.message(Command("new"))
     async def cmd_new(message: Message) -> None:
-        assert message.from_user
+        assert message.from_user and message.bot
         name = (message.text or "").replace("/new", "").strip() or "untitled"
+        chat = message.chat
         try:
-            session = await session_manager.create_session(message.from_user.id, name)
-            await message.answer(
-                f"Created session: **{session.name}** (`{session.id}`)\nNew Claude session (no history).",
-                parse_mode="Markdown",
-            )
+            # In forum group: create a topic thread for this session
+            if chat.is_forum:
+                topic = await message.bot.create_forum_topic(chat.id, name)
+                session = await session_manager.create_session(
+                    message.from_user.id, name, topic_id=topic.message_thread_id,
+                )
+                await message.bot.send_message(
+                    chat.id,
+                    f"Session ready: {session.name}",
+                    message_thread_id=topic.message_thread_id,
+                )
+            else:
+                session = await session_manager.create_session(message.from_user.id, name)
+                await message.answer(
+                    f"Created session: {session.name} ({session.id})\nNew Claude session (no history).",
+                )
         except ValueError as e:
             await message.answer(str(e))
 
@@ -424,9 +459,9 @@ def setup_handlers(
     @r.message(Command("cancel"))
     async def cmd_cancel(message: Message) -> None:
         assert message.from_user
-        user_id = message.from_user.id
-        _cancel_flags[user_id] = True
-        _message_queues.pop(user_id, None)
+        session = await _resolve_session(message)
+        _cancel_flags[session.id] = True
+        _message_queues.pop(session.id, None)
         await message.answer("Cancelling... (queue cleared)")
 
     @r.message(Command("restart"))
@@ -649,7 +684,7 @@ def setup_handlers(
 
         caption = message.caption or "Please analyze this image."
         prompt = f"I'm sharing an image. View it at: {filepath}\n\n{caption}"
-        await _process_with_queue(message, user_id, prompt)
+        await _process_with_queue(message, prompt)
 
     @r.message(F.document)
     async def handle_document(message: Message) -> None:
@@ -667,11 +702,11 @@ def setup_handlers(
 
         caption = message.caption or f"Please analyze this file: {filename}"
         prompt = f"I'm sharing a file ({filename}). Read it at: {filepath}\n\n{caption}"
-        await _process_with_queue(message, user_id, prompt)
+        await _process_with_queue(message, prompt)
 
     @r.message(F.text)
     async def handle_message(message: Message) -> None:
         if message.text and _is_bot_command(message.text):
             return
         assert message.from_user and message.text
-        await _process_with_queue(message, message.from_user.id, message.text)
+        await _process_with_queue(message, message.text)
