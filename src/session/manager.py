@@ -76,6 +76,14 @@ class SessionManager:
         await self._repo.delete_session(session_id)
         logger.info("Deleted session: %s", session_id)
 
+    async def close_session(self, session_id: str) -> None:
+        await self._repo.update_session(session_id, is_active=0)
+        logger.info("Closed session: %s", session_id)
+
+    async def reopen_session(self, session_id: str) -> None:
+        await self._repo.update_session(session_id, is_active=1)
+        logger.info("Reopened session: %s", session_id)
+
     async def rename_session(self, user_id: int, session_id: str, name: str) -> None:
         session = await self._repo.get_session(session_id)
         if not session or session.user_id != user_id:

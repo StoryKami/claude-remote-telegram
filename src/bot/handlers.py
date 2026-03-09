@@ -465,6 +465,27 @@ def setup_handlers(
         _message_queues.pop(session.id, None)
         await message.answer("Cancelling... (queue cleared)")
 
+    @r.message(Command("close"))
+    async def cmd_close(message: Message) -> None:
+        """Close current session (can be reopened later)."""
+        assert message.from_user
+        session = await _resolve_session(message)
+        await session_manager.close_session(session.id)
+        await message.answer(f"Session closed: {session.name}\nUse /reopen to resume later.")
+
+    @r.message(Command("reopen"))
+    async def cmd_reopen(message: Message) -> None:
+        """Reopen a closed session in this topic."""
+        assert message.from_user
+        topic_id = message.message_thread_id
+        if topic_id:
+            session = await session_manager.get_session_by_topic(topic_id)
+            if session:
+                await session_manager.reopen_session(session.id)
+                await message.answer(f"Session reopened: {session.name}")
+                return
+        await message.answer("No closed session found for this topic.")
+
     @r.message(Command("restart"))
     async def cmd_restart(message: Message) -> None:
         assert message.from_user
@@ -687,8 +708,8 @@ def setup_handlers(
     # Bot-managed commands
     _bot_commands = {
         "start", "help", "new", "sessions", "switch",
-        "current", "rename", "delete", "cancel", "mode",
-        "restart", "pull", "local",
+        "current", "rename", "delete", "cancel", "close", "reopen",
+        "mode", "restart", "pull", "local",
     }
 
     def _is_bot_command(text: str) -> bool:
@@ -696,6 +717,30 @@ def setup_handlers(
             return False
         cmd = text.split()[0].lstrip("/").split("@")[0]
         return cmd in _bot_commands
+
+    # --- Topic lifecycle ---
+
+    @r.message(F.forum_topic_closed)
+    async def on_topic_closed(message: Message) -> None:
+        """When a topic is closed in Telegram, close the session."""
+        topic_id = message.message_thread_id
+        if not topic_id:
+            return
+        session = await session_manager.get_session_by_topic(topic_id)
+        if session:
+            await session_manager.close_session(session.id)
+            logger.info("Topic %d closed → session %s closed", topic_id, session.id)
+
+    @r.message(F.forum_topic_reopened)
+    async def on_topic_reopened(message: Message) -> None:
+        """When a topic is reopened in Telegram, reopen the session."""
+        topic_id = message.message_thread_id
+        if not topic_id:
+            return
+        session = await session_manager.get_session_by_topic(topic_id)
+        if session:
+            await session_manager.reopen_session(session.id)
+            logger.info("Topic %d reopened → session %s reopened", topic_id, session.id)
 
     # --- Content handlers (photo, document, text) ---
 
