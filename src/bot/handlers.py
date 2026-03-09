@@ -472,10 +472,20 @@ def setup_handlers(
                 return
         await message.answer("No closed session found for this topic.")
 
+    def _save_restart_chat(message: Message) -> None:
+        """Save chat info so restart notification goes to the right place."""
+        restart_file = workspace_path / "data" / ".restart_chat"
+        restart_file.parent.mkdir(parents=True, exist_ok=True)
+        restart_file.write_text(json.dumps({
+            "chat_id": message.chat.id,
+            "thread_id": message.message_thread_id,
+        }))
+
     @r.message(Command("restart"))
     async def cmd_restart(message: Message) -> None:
         assert message.from_user
         await message.answer("Restarting bot...")
+        _save_restart_chat(message)
         logger.info("Restart requested by user %d", message.from_user.id)
         await asyncio.sleep(0.5)
         os.execv(sys.executable, [sys.executable, "-m", "src.main"])
@@ -497,6 +507,7 @@ def setup_handlers(
         except Exception as e:
             await message.answer(f"Git pull failed: {e}")
             return
+        _save_restart_chat(message)
         logger.info("Pull + restart requested by user %d", message.from_user.id)
         await asyncio.sleep(0.5)
         os.execv(sys.executable, [sys.executable, "-m", "src.main"])

@@ -63,12 +63,29 @@ async def main() -> None:
         BotCommand(command="help", description="Help"),
     ])
 
-    # Notify users that bot has (re)started
-    for uid in settings.get_allowed_user_ids():
+    # Notify restart completion to the chat that triggered it
+    restart_file = settings.get_db_path().parent / ".restart_chat"
+    if restart_file.exists():
         try:
-            await bot.send_message(uid, "Bot restarted.")
+            import json as _json
+            data = _json.loads(restart_file.read_text())
+            chat_id = data.get("chat_id")
+            thread_id = data.get("thread_id")
+            if chat_id:
+                await bot.send_message(
+                    chat_id, "Bot restarted.",
+                    message_thread_id=thread_id,
+                )
         except Exception:
             pass
+        restart_file.unlink(missing_ok=True)
+    else:
+        # Cold start — notify all users via DM
+        for uid in settings.get_allowed_user_ids():
+            try:
+                await bot.send_message(uid, "Bot started.")
+            except Exception:
+                pass
 
     logger.info("Workspace: %s", settings.get_workspace_path())
     logger.info("Bot starting...")
