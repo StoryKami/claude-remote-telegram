@@ -342,6 +342,7 @@ def setup_handlers(
         assert message.from_user and message.bot
         name = (message.text or "").replace("/new", "").strip() or "untitled"
         chat = message.chat
+        logger.info("cmd_new: chat.id=%s chat.type=%s is_forum=%s", chat.id, chat.type, chat.is_forum)
         try:
             # In forum group: create a topic thread for this session
             if chat.is_forum:
