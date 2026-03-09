@@ -100,11 +100,33 @@ def setup_handlers(
         while True:
             await asyncio.sleep(2)
             elapsed = int(time.monotonic() - start)
-            await _safe_edit(
+            await _safe_edit_html(
                 status_msg,
-                f"{mode_label}{frames[i % len(frames)]} Thinking... ({elapsed}s)\n\n> {hint}",
+                f"{mode_label}{frames[i % len(frames)]} Thinking... ({elapsed}s)\n\n&gt; {hint}",
             )
             i += 1
+
+    def _build_status_html(
+        current: str,
+        steps: list[tuple[str, int]],
+        elapsed: int,
+    ) -> str:
+        """Build status message with expandable step history."""
+        header = f"{current} ({elapsed}s)"
+        if not steps:
+            return header
+        detail_lines = [f"✓ {name} ({t}s)" for name, t in steps]
+        detail = "\n".join(detail_lines)
+        return (
+            f"{header}\n"
+            f"<blockquote expandable>{detail}\n\nElapsed: {elapsed}s</blockquote>"
+        )
+
+    async def _safe_edit_html(msg: Message, html: str) -> None:
+        try:
+            await msg.edit_text(html, parse_mode="HTML")
+        except Exception:
+            pass
 
     async def _process_prompt(
         message: Message,
@@ -120,20 +142,19 @@ def setup_handlers(
             prompt = PLAN_MODE_PREFIX + prompt
 
         mode_label = f"[{mode}] " if mode != "code" else ""
-        # Strip plan mode prefix for display
         display_prompt = prompt.removeprefix(PLAN_MODE_PREFIX)
         hint = display_prompt[:80].replace("\n", " ")
         if len(display_prompt) > 80:
             hint += "..."
 
         start_time = time.monotonic()
-        status_msg = await message.answer(f"{mode_label}Thinking.\n\n> {hint}")
+        status_msg = await message.answer(f"{mode_label}Thinking.\n\n&gt; {hint}", parse_mode="HTML")
         last_edit = start_time
         accumulated_text = ""
         accumulated_thinking = ""
         thinking_sent = False
         last_tool_status = ""
-        steps: list[str] = []  # track completed steps
+        steps: list[tuple[str, int]] = []  # (description, elapsed_seconds)
 
         thinking_task = asyncio.create_task(
             _animate_thinking(status_msg, mode_label, start_time, hint)
@@ -147,7 +168,6 @@ def setup_handlers(
                 if _cancel_flags.get(user_id):
                     raise asyncio.CancelledError()
 
-                # Stop spinner on first non-thinking event
                 if event.type != "thinking" and not thinking_task.done():
                     thinking_task.cancel()
 
@@ -179,13 +199,15 @@ def setup_handlers(
                     accumulated_text += event.data
                     now = time.monotonic()
                     if now - last_edit >= 2.5:
-                        preview = accumulated_text[-3500:]
-                        if len(accumulated_text) > 3500:
+                        preview = accumulated_text[-3000:]
+                        if len(accumulated_text) > 3000:
                             preview = "...\n" + preview
-                        step_log = "\n".join(f"  ✓ {s}" for s in steps[-3:])
-                        footer = f"\n\n{step_log}\n✍️ Writing... ({elapsed}s)" if step_log else f"\n\n✍️ Writing... ({elapsed}s)"
-                        await _safe_edit(
-                            status_msg, f"{preview or '...'}{footer}"
+                        html = _build_status_html(
+                            "✍️ Writing...", steps, elapsed,
+                        )
+                        # preview + expandable details
+                        await _safe_edit_html(
+                            status_msg, f"{preview}\n\n{html}"
                         )
                         last_edit = now
 
@@ -200,16 +222,17 @@ def setup_handlers(
                         except Exception:
                             pass
                     last_tool_status = event.data
-                    step_log = "\n".join(f"  ✓ {s}" for s in steps[-3:])
-                    status = f"⏳ {event.data} ({elapsed}s)"
-                    if step_log:
-                        status = f"{step_log}\n{status}"
-                    await _safe_edit(status_msg, status)
+                    html = _build_status_html(
+                        f"⏳ {event.data}", steps, elapsed,
+                    )
+                    await _safe_edit_html(status_msg, html)
 
                 elif event.type == "tool_result":
-                    steps.append(last_tool_status)
-                    step_log = "\n".join(f"  ✓ {s}" for s in steps[-4:])
-                    await _safe_edit(status_msg, f"{step_log}\n({elapsed}s)")
+                    steps.append((last_tool_status, elapsed))
+                    html = _build_status_html(
+                        f"✓ {last_tool_status}", steps, elapsed,
+                    )
+                    await _safe_edit_html(status_msg, html)
 
                 elif event.type == "error":
                     await status_msg.edit_text(f"Error: {event.data[:4000]}")
