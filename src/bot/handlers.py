@@ -38,8 +38,6 @@ router = Router()
 _session_locks: dict[str, asyncio.Lock] = {}
 _cancel_flags: dict[str, bool] = {}
 _message_queues: dict[str, deque[tuple[Message, str]]] = {}
-# Per Claude session lock (prevents concurrent --resume on same CLI session)
-_claude_session_locks: dict[str, asyncio.Lock] = {}
 # Per-user state
 _user_modes: dict[int, str] = {}
 # Cache: claude_session_id → preview text (for naming topics from /local)
@@ -62,12 +60,6 @@ def _is_valid_session_id(sid: str) -> bool:
 def _get_session_lock(session_id: str) -> asyncio.Lock:
     return _session_locks.setdefault(session_id, asyncio.Lock())
 
-
-def _get_claude_lock(claude_session_id: str | None) -> asyncio.Lock | None:
-    """Get lock for a Claude CLI session to prevent concurrent --resume."""
-    if not claude_session_id:
-        return None
-    return _claude_session_locks.setdefault(claude_session_id, asyncio.Lock())
 
 
 def _extract_text(content: object) -> str:
@@ -727,12 +719,6 @@ def setup_handlers(
                         text="Clone (fork)",
                         callback_data=f"local_clone:{claude_session_id}",
                     ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="Share (link)",
-                        callback_data=f"local_force:{claude_session_id}",
-                    ),
                     InlineKeyboardButton(text="Cancel", callback_data="local_cancel"),
                 ],
             ])
@@ -742,8 +728,7 @@ def setup_handlers(
                     await callback.message.edit_text(
                         f"Session already in: {existing.name}\n\n"
                         "Continue = go to existing topic\n"
-                        "Clone = fork (same history, diverges)\n"
-                        "Share = new topic, shared context",
+                        "Clone = fork (same history, then diverges)",
                         reply_markup=keyboard,
                     )
                 except Exception:
@@ -837,38 +822,6 @@ def setup_handlers(
         except Exception as e:
             logger.exception("local_continue error")
             await callback.answer("Error recreating topic", show_alert=True)
-
-    @r.callback_query(F.data.startswith("local_force:"))
-    async def cb_local_force(callback: CallbackQuery) -> None:
-        """Share: create new topic with same Claude session (shared context)."""
-        assert callback.from_user and callback.data and callback.message
-        claude_session_id = callback.data.split(":", 1)[1]
-        user_id = callback.from_user.id
-        chat = callback.message.chat
-        short_id = claude_session_id[:8]
-        name = _local_preview_cache.pop(claude_session_id, "") or f"shared-{short_id}"
-        if len(name) > 30:
-            name = name[:27] + "..."
-
-        if chat.is_forum and callback.message.bot:
-            try:
-                topic = await callback.message.bot.create_forum_topic(chat.id, name)
-                session = await session_manager.create_session(
-                    user_id, name, topic_id=topic.message_thread_id,
-                )
-                await session_manager.set_claude_session_id(session.id, claude_session_id)
-                await callback.message.bot.send_message(
-                    chat.id, f"Connected (shared): {name}",
-                    message_thread_id=topic.message_thread_id,
-                )
-                await callback.answer("Shared topic created")
-                try:
-                    await callback.message.edit_text(f"Opened (shared): {name}")
-                except Exception:
-                    pass
-            except Exception as e:
-                logger.exception("local_force error")
-                await callback.answer("Error creating topic", show_alert=True)
 
     def _clone_session_files(source_id: str) -> str | None:
         """Copy Claude session JSONL + dir to a new UUID. Returns new session ID."""
