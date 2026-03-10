@@ -245,10 +245,13 @@ def setup_handlers(
                     pass
 
         async def finalize(self, html: str) -> None:
-            """Convert current status msg to permanent, prepare for next group."""
+            """Convert current status msg to permanent, or delete if empty."""
             if self.msg:
                 try:
-                    await self.msg.edit_text(html, parse_mode="HTML", reply_markup=None)
+                    if html.strip():
+                        await self.msg.edit_text(html, parse_mode="HTML", reply_markup=None)
+                    else:
+                        await self.msg.delete()
                 except Exception:
                     pass
             self.msg = None
@@ -367,19 +370,25 @@ def setup_handlers(
             nonlocal group_text, group_tools, had_tools
             if not group_text and not group_tools:
                 return
-            parts: list[str] = []
-            if group_text:
-                escaped = group_text.strip().replace("<", "&lt;").replace(">", "&gt;")
-                parts.append(f"💬 {escaped}")
+            # Finalize: tools as expandable summary, text sent separately
             if group_tools:
                 tool_lines = "\n".join(f"✓ {desc} ({t}s)" for desc, t in group_tools)
-                parts.append(f"<blockquote expandable>{tool_lines}</blockquote>")
-            html = "\n".join(parts)
-            # Edit current status msg into the completed group (stays in place)
-            await tracker.finalize(html)
+                await tracker.finalize(f'<blockquote expandable>{tool_lines}</blockquote>')
+            else:
+                await tracker.finalize("")
+            # Send accumulated text as a regular message (not status)
+            if group_text.strip():
+                chunks = format_telegram_message(group_text.strip())
+                for chunk in chunks:
+                    try:
+                        await message.answer(chunk)
+                    except TelegramRetryAfter as e:
+                        await asyncio.sleep(e.retry_after)
+                        await message.answer(chunk)
             # Reset tracker state for next group
             tracker.last_text = ""
             tracker.current_tool = ""
+            tracker.hint = ""  # hint only on first group
             tracker.steps = []
             group_text = ""
             group_tools = []
