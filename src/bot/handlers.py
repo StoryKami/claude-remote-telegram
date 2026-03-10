@@ -289,7 +289,7 @@ def setup_handlers(
         if mode != "code":
             tracker.phase = f"[{mode}] Thinking..."
 
-        await tracker.start()
+        await tracker.refresh()
         ticker_task = asyncio.create_task(_run_status_ticker(tracker))
         accumulated_text = ""
         accumulated_thinking = ""
