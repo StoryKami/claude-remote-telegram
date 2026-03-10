@@ -795,9 +795,27 @@ def setup_handlers(
                 logger.exception("local_force error")
                 await callback.answer("Error creating topic", show_alert=True)
 
+    def _clone_session_files(source_id: str) -> str | None:
+        """Copy Claude session JSONL + dir to a new UUID. Returns new session ID."""
+        import shutil
+        new_id = str(uuid.uuid4())
+        for project_dir in CLAUDE_PROJECTS_DIR.iterdir():
+            if not project_dir.is_dir():
+                continue
+            src_jsonl = project_dir / f"{source_id}.jsonl"
+            if src_jsonl.exists():
+                dst_jsonl = project_dir / f"{new_id}.jsonl"
+                shutil.copy2(str(src_jsonl), str(dst_jsonl))
+                # Also copy companion directory if it exists
+                src_dir = project_dir / source_id
+                if src_dir.is_dir():
+                    shutil.copytree(str(src_dir), str(project_dir / new_id))
+                return new_id
+        return None
+
     @r.callback_query(F.data.startswith("local_clone:"))
     async def cb_local_clone(callback: CallbackQuery) -> None:
-        """Clone: create topic with fresh Claude session (no shared context)."""
+        """Clone: copy session files to create independent fork with same history."""
         assert callback.from_user and callback.data and callback.message
         claude_session_id = callback.data.split(":", 1)[1]
         user_id = callback.from_user.id
@@ -807,18 +825,24 @@ def setup_handlers(
         if len(name) > 30:
             name = name[:27] + "..."
 
+        # Clone session files on disk
+        new_claude_id = await asyncio.to_thread(_clone_session_files, claude_session_id)
+        if not new_claude_id:
+            await callback.answer("Session file not found, cannot clone.", show_alert=True)
+            return
+
         if chat.is_forum and callback.message.bot:
             try:
-                topic = await callback.message.bot.create_forum_topic(chat.id, name)
+                topic = await callback.message.bot.create_forum_topic(chat.id, f"fork: {name}")
                 session = await session_manager.create_session(
-                    user_id, name, topic_id=topic.message_thread_id,
+                    user_id, f"fork: {name}", topic_id=topic.message_thread_id,
                 )
-                # No set_claude_session_id — fresh session, no --resume
+                await session_manager.set_claude_session_id(session.id, new_claude_id)
                 await callback.message.bot.send_message(
-                    chat.id, f"Connected (fresh): {name}",
+                    chat.id, f"Cloned: {name}\nSame history, independent from now.",
                     message_thread_id=topic.message_thread_id,
                 )
-                await callback.answer("Fresh topic created")
+                await callback.answer("Cloned!")
                 try:
                     await callback.message.edit_text(f"Opened (fresh): {name}")
                 except Exception:
