@@ -165,6 +165,7 @@ class ClaudeBridge:
                     result_session_id = message.session_id
                     cost = getattr(message, "total_cost_usd", None)
                     usage = getattr(message, "usage", None) or {}
+                    logger.debug("ResultMessage: cost=%s usage=%s", cost, usage)
                     # Emit usage info for context tracking
                     usage_str = json.dumps({
                         "cost_usd": cost,
