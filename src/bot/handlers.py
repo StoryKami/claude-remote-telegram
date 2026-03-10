@@ -38,6 +38,7 @@ router = Router()
 _session_locks: dict[str, asyncio.Lock] = {}
 _cancel_flags: dict[str, bool] = {}
 _message_queues: dict[str, deque[tuple[Message, str]]] = {}
+_active_processes: dict[str, asyncio.subprocess.Process] = {}  # session_id -> subprocess
 # Per-user state
 _user_modes: dict[int, str] = {}
 # Pending rename: user_id → (session_id, topic_id, chat_id)
@@ -221,6 +222,7 @@ def setup_handlers(
             async for event in bridge.send_message(
                 prompt=prompt,
                 claude_session_id=session.claude_session_id,
+                process_key=session.id,
             ):
                 if _cancel_flags.get(session.id):
                     raise asyncio.CancelledError()
@@ -512,6 +514,7 @@ def setup_handlers(
         session = await _resolve_session(message)
         _cancel_flags[session.id] = True
         _message_queues.pop(session.id, None)
+        bridge.kill_process(session.id)
         await message.answer("Cancelling... (queue cleared)")
 
     @r.message(Command("close"))
@@ -981,8 +984,8 @@ def setup_handlers(
             return
         _cancel_flags[session_id] = True
         _message_queues.pop(session_id, None)
-        queue_msg = ""
-        await callback.answer(f"Stopped all.{queue_msg}")
+        bridge.kill_process(session_id)
+        await callback.answer("Stopped all.")
 
     @r.callback_query(F.data.startswith("stop:"))
     async def cb_stop(callback: CallbackQuery) -> None:
@@ -991,10 +994,10 @@ def setup_handlers(
         if not await _verify_session_owner(callback, session_id):
             return
         _cancel_flags[session_id] = True
-        # Keep queue — next message will process after cancel
+        bridge.kill_process(session_id)
         queued = len(_message_queues.get(session_id, []))
         queue_msg = f" ({queued} queued will continue)" if queued else ""
-        await callback.answer(f"Stopping current...{queue_msg}")
+        await callback.answer(f"Stopping...{queue_msg}")
 
     @r.callback_query(F.data.startswith("rename_topic:"))
     async def cb_rename_topic(callback: CallbackQuery) -> None:

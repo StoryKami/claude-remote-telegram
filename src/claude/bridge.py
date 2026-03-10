@@ -28,6 +28,25 @@ class ClaudeBridge:
         self._max_budget = settings.claude_max_budget_usd
         self._workspace = settings.get_workspace_path()
         self._timeout = settings.cli_timeout
+        # Exposed for external kill (e.g., stop button)
+        self.active_processes: dict[str, asyncio.subprocess.Process] = {}  # key -> process
+
+    def kill_process(self, key: str) -> bool:
+        """Kill an active subprocess by key. Returns True if killed."""
+        proc = self.active_processes.get(key)
+        if not proc or proc.returncode is not None:
+            return False
+        try:
+            if sys.platform == "win32":
+                import subprocess as _sp
+                _sp.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True, timeout=5)
+            else:
+                proc.kill()
+            logger.info("Killed process for key=%s pid=%s", key, proc.pid)
+            return True
+        except Exception:
+            return False
 
     def _build_command(
         self,
@@ -54,6 +73,7 @@ class ClaudeBridge:
         self,
         prompt: str,
         claude_session_id: str | None = None,
+        process_key: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         cmd = self._build_command(prompt, claude_session_id)
         logger.info("CLI command: %s", " ".join(cmd[:6]) + "...")
@@ -75,6 +95,9 @@ class ClaudeBridge:
             return
 
         assert process.stdout
+
+        if process_key:
+            self.active_processes[process_key] = process
 
         result_session_id: str | None = None
         accumulated_text = ""
@@ -120,6 +143,8 @@ class ClaudeBridge:
                 yield StreamEvent("error", f"CLI exited with code {process.returncode}: {stderr[:500]}")
             yield StreamEvent("done", accumulated_text, session_id=result_session_id)
         finally:
+            if process_key:
+                self.active_processes.pop(process_key, None)
             # Always ensure subprocess and its children are cleaned up
             if process.returncode is None:
                 try:
