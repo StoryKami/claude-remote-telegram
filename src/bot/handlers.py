@@ -412,6 +412,27 @@ def setup_handlers(
                     # Let ticker handle refresh (every 3s)
 
                 elif event.type == "error":
+                    error_lower = (event.data or "").lower()
+                    context_keywords = ("context window", "token limit", "too long", "max_tokens", "context length", "exceeded")
+                    is_context_error = any(kw in error_lower for kw in context_keywords)
+
+                    if is_context_error and session.claude_session_id:
+                        # Context overflow — auto compact and retry
+                        logger.warning("Context overflow detected, auto-compacting: %s", event.data[:200])
+                        ticker_task.cancel()
+                        await tracker.finalize(f"⚠️ Context overflow — compacting...")
+                        try:
+                            result = await bridge.compact_session(session.claude_session_id)
+                            await message.answer(f"🗜 Auto-compacted: {result[:200]}")
+                            _session_last_pct_notified.pop(session.id, None)
+                            # Retry the original prompt
+                            await message.answer("🔄 Retrying...")
+                            await _process_prompt(message, session, prompt)
+                        except Exception:
+                            logger.exception("Auto-compact retry failed")
+                            await message.answer("❌ Auto-compact failed. Try /compact manually.")
+                        return
+
                     ticker_task.cancel()
                     logger.error("CLI error: %s", event.data[:500])
                     await tracker.finalize(f"❌ Error ({tracker.elapsed()}s)")
