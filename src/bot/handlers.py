@@ -190,32 +190,34 @@ def setup_handlers(
 
             return "\n".join(parts)
 
+        async def start(self) -> None:
+            """Create a new status message. Call once at the beginning."""
+            html = self.render()
+            self._last_rendered = html
+            try:
+                self.msg = await self._chat_msg.answer(
+                    html, parse_mode="HTML", reply_markup=self._stop_kb,
+                )
+            except Exception:
+                pass
+
         async def refresh(self) -> None:
-            if self._stopped:
+            """Update existing status message. Never creates new messages."""
+            if self._stopped or not self.msg:
                 return
             html = self.render()
             if html == self._last_rendered:
                 return
             self._last_rendered = html
-            if self.msg:
-                try:
-                    await self.msg.edit_text(html, parse_mode="HTML", reply_markup=self._stop_kb)
-                    return
-                except TelegramRetryAfter as e:
-                    await asyncio.sleep(e.retry_after)
-                except Exception:
-                    pass
-            # First time only — send new (don't resend on edit failure)
-            if not self.msg:
-                try:
-                    self.msg = await self._chat_msg.answer(
-                        html, parse_mode="HTML", reply_markup=self._stop_kb,
-                    )
-                except Exception:
-                    pass
+            try:
+                await self.msg.edit_text(html, parse_mode="HTML", reply_markup=self._stop_kb)
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+            except Exception:
+                pass
 
         async def finalize(self, html: str) -> None:
-            """Convert current status msg to a permanent message, then start fresh."""
+            """Convert current status msg to permanent, prepare for next group."""
             if self.msg:
                 try:
                     await self.msg.edit_text(html, parse_mode="HTML", reply_markup=None)
@@ -223,7 +225,17 @@ def setup_handlers(
                     pass
             self.msg = None
             self._last_rendered = ""
-            # Don't set _stopped — allow new status msg for next group
+
+        async def new_status(self) -> None:
+            """Create a fresh status message for the next group."""
+            html = self.render()
+            self._last_rendered = html
+            try:
+                self.msg = await self._chat_msg.answer(
+                    html, parse_mode="HTML", reply_markup=self._stop_kb,
+                )
+            except Exception:
+                pass
 
         async def delete(self) -> None:
             """Remove status message and stop all future refreshes."""
@@ -277,6 +289,7 @@ def setup_handlers(
         if mode != "code":
             tracker.phase = f"[{mode}] Thinking..."
 
+        await tracker.start()
         ticker_task = asyncio.create_task(_run_status_ticker(tracker))
         accumulated_text = ""
         accumulated_thinking = ""
@@ -360,12 +373,16 @@ def setup_handlers(
                     # New text after tools = flush previous group, start new
                     if had_tools:
                         await _flush_group()
+                        await tracker.new_status()
                     accumulated_text += event.data
                     group_text += event.data
                     tracker.phase = "Writing..."
                     tracker.last_text = group_text[-200:]
 
                 elif event.type == "tool_use":
+                    # First tool after flush needs a new status msg
+                    if not tracker.msg:
+                        await tracker.new_status()
                     had_tools = True
                     tracker.phase = "Working..."
                     tracker.current_tool = event.data
