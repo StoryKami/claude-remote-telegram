@@ -43,6 +43,11 @@
 
 ## P0 — 즉시 구현 (사용성 핵심)
 
+### Stop 즉시 반응
+- [ ] Stop 버튼 누르면 SDK query를 즉시 중단 (현재 cancel_event 기반인데 반응이 느림)
+- [ ] SDK 내부 subprocess를 직접 kill하거나, query iterator를 강제 종료하는 방식 검토
+- [ ] 사용자 체감: Stop 누르면 1초 이내 멈춤
+
 ### 메시지 수정 시 재처리
 - [ ] 사용자가 처리 중인 메시지를 수정하면, 현재 처리를 중단하고 수정된 메시지로 다시 처리
 - [ ] aiogram의 edited_message 이벤트 핸들링
