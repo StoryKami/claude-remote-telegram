@@ -701,9 +701,32 @@ def setup_handlers(
         # Check if this Claude session is already linked to a topic
         existing = await session_manager.find_by_claude_session_id(claude_session_id)
         if existing and existing.topic_id:
-            await callback.answer(
-                f"Already connected in topic: {existing.name}", show_alert=True,
-            )
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Share (same context)",
+                        callback_data=f"local_force:{claude_session_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="Clone (new context)",
+                        callback_data=f"local_clone:{claude_session_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(text="Cancel", callback_data="local_cancel"),
+                ],
+            ])
+            await callback.answer()
+            if callback.message:
+                try:
+                    await callback.message.edit_text(
+                        f"This session is already in topic: {existing.name}\n\n"
+                        "Share = same Claude context (messages affect both)\n"
+                        "Clone = fresh topic, no shared context",
+                        reply_markup=keyboard,
+                    )
+                except Exception:
+                    pass
             return
 
         # In forum group: create a new topic for this local session
@@ -739,6 +762,79 @@ def setup_handlers(
             await callback.message.edit_text(text)
         except Exception:
             await callback.message.answer(text)
+
+    @r.callback_query(F.data.startswith("local_force:"))
+    async def cb_local_force(callback: CallbackQuery) -> None:
+        """Share: create topic with same Claude session (shared context)."""
+        assert callback.from_user and callback.data and callback.message
+        claude_session_id = callback.data.split(":", 1)[1]
+        user_id = callback.from_user.id
+        chat = callback.message.chat
+        short_id = claude_session_id[:8]
+        name = _local_preview_cache.pop(claude_session_id, "") or f"shared-{short_id}"
+        if len(name) > 30:
+            name = name[:27] + "..."
+
+        if chat.is_forum and callback.message.bot:
+            try:
+                topic = await callback.message.bot.create_forum_topic(chat.id, name)
+                session = await session_manager.create_session(
+                    user_id, name, topic_id=topic.message_thread_id,
+                )
+                await session_manager.set_claude_session_id(session.id, claude_session_id)
+                await callback.message.bot.send_message(
+                    chat.id, f"Connected (shared): {name}",
+                    message_thread_id=topic.message_thread_id,
+                )
+                await callback.answer("Shared topic created")
+                try:
+                    await callback.message.edit_text(f"Opened (shared): {name}")
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.exception("local_force error")
+                await callback.answer("Error creating topic", show_alert=True)
+
+    @r.callback_query(F.data.startswith("local_clone:"))
+    async def cb_local_clone(callback: CallbackQuery) -> None:
+        """Clone: create topic with fresh Claude session (no shared context)."""
+        assert callback.from_user and callback.data and callback.message
+        claude_session_id = callback.data.split(":", 1)[1]
+        user_id = callback.from_user.id
+        chat = callback.message.chat
+        short_id = claude_session_id[:8]
+        name = _local_preview_cache.pop(claude_session_id, "") or f"clone-{short_id}"
+        if len(name) > 30:
+            name = name[:27] + "..."
+
+        if chat.is_forum and callback.message.bot:
+            try:
+                topic = await callback.message.bot.create_forum_topic(chat.id, name)
+                session = await session_manager.create_session(
+                    user_id, name, topic_id=topic.message_thread_id,
+                )
+                # No set_claude_session_id — fresh session, no --resume
+                await callback.message.bot.send_message(
+                    chat.id, f"Connected (fresh): {name}",
+                    message_thread_id=topic.message_thread_id,
+                )
+                await callback.answer("Fresh topic created")
+                try:
+                    await callback.message.edit_text(f"Opened (fresh): {name}")
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.exception("local_clone error")
+                await callback.answer("Error creating topic", show_alert=True)
+
+    @r.callback_query(F.data == "local_cancel")
+    async def cb_local_cancel(callback: CallbackQuery) -> None:
+        await callback.answer("Cancelled")
+        if callback.message:
+            try:
+                await callback.message.edit_text("Cancelled.")
+            except Exception:
+                pass
 
     # Bot-managed commands
     _bot_commands = {
