@@ -445,6 +445,8 @@ def setup_handlers(
                         input_tokens = usage_data.get("input_tokens", 0)
                         output_tokens = usage_data.get("output_tokens", 0)
                         cost_usd = usage_data.get("cost_usd") or 0
+                        # REPLACE (not cumulative): input_tokens = current context size,
+                        # auto-updated by SDK each turn (shrinks after compact)
                         _session_input_tokens[session.id] = input_tokens
                         _session_output_tokens[session.id] = (
                             _session_output_tokens.get(session.id, 0) + output_tokens
@@ -478,7 +480,7 @@ def setup_handlers(
                         if _context_notify.get(user_id, False):
                             bracket = (pct // 10) * 10
                             last_bracket = _session_last_pct_notified.get(session.id, 0)
-                            if bracket > last_bracket and bracket >= 10:
+                            if bracket != last_bracket and bracket >= 10:
                                 _session_last_pct_notified[session.id] = bracket
                                 await message.answer(
                                     f"📊 Context: {pct}% ({input_tokens:,} / {ctx_window:,} tokens)"
@@ -491,7 +493,7 @@ def setup_handlers(
                             )
                             result = await bridge.compact_session(session.claude_session_id)
                             await message.answer(f"Compacted: {result[:200]}")
-                            _session_last_pct_notified[session.id] = 0
+                            _session_last_pct_notified.pop(session.id, None)
                     except Exception:
                         logger.debug("Failed to parse usage event", exc_info=True)
 
@@ -1385,7 +1387,7 @@ def setup_handlers(
         session = await session_manager.get_or_create_active(user_id)
         await session_manager.set_claude_session_id(session.id, claude_session_id)
 
-        text = f"Active session: {session.name} ({short_id}...)"
+        text = f"Active session: {session.name} ({claude_session_id[:8]}...)"
         await callback.answer(f"Connected: {session.name}")
         try:
             await callback.message.edit_text(text)
@@ -1514,20 +1516,6 @@ def setup_handlers(
                 await callback.message.edit_text("Cancelled.")
             except Exception:
                 pass
-
-    # rename_topic:<session_id>:<topic_id> — prompts user, next text message becomes new name
-    _pending_renames: dict[int, tuple[str, int]] = {}  # user_id -> (session_id, topic_id)
-
-    @r.callback_query(F.data.startswith("rename_topic:"))
-    async def cb_rename_topic(callback: CallbackQuery) -> None:
-        assert callback.from_user and callback.data
-        parts = callback.data.split(":")
-        session_id = parts[1]
-        topic_id = int(parts[2])
-        _pending_renames[callback.from_user.id] = (session_id, topic_id)
-        await callback.answer()
-        if callback.message:
-            await callback.message.answer("Send the new name for this topic:")
 
     # Bot-managed commands
     _bot_commands = {
@@ -1700,7 +1688,7 @@ def setup_handlers(
         # Handle pending topic rename
         rename_info = _pending_renames.pop(message.from_user.id, None)
         if rename_info:
-            session_id, topic_id = rename_info
+            session_id, topic_id, _chat_id = rename_info
             new_name = message.text.strip()[:128]
             try:
                 await session_manager.rename_session(
