@@ -93,6 +93,22 @@ def setup_handlers(
 
     tmp_dir = workspace_path / "_tmp" / "telegram"
 
+    async def _send_topic_welcome(
+        bot: Bot, chat_id: int, topic_id: int, session_id: str, text: str,
+    ) -> None:
+        """Send welcome message in a new topic with a Rename button."""
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Rename topic",
+                callback_data=f"rename_topic:{session_id}:{topic_id}",
+            ),
+        ]])
+        await bot.send_message(
+            chat_id, text,
+            message_thread_id=topic_id,
+            reply_markup=keyboard,
+        )
+
     async def _save_telegram_file(bot: Bot, file_id: str, ext: str = ".jpg") -> Path:
         """Download a Telegram file to workspace tmp dir."""
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -121,6 +137,7 @@ def setup_handlers(
             self._last_rendered = ""
             self._stop_kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="■ Stop", callback_data=f"stop:{session_id}"),
+                InlineKeyboardButton(text="■ Stop All", callback_data=f"stopall:{session_id}"),
             ]])
 
         def elapsed(self) -> int:
@@ -352,10 +369,9 @@ def setup_handlers(
                 session = await session_manager.create_session(
                     message.from_user.id, name, topic_id=topic.message_thread_id,
                 )
-                await message.bot.send_message(
-                    chat.id,
-                    f"Session ready: {session.name}",
-                    message_thread_id=topic.message_thread_id,
+                await _send_topic_welcome(
+                    message.bot, chat.id, topic.message_thread_id,
+                    session.id, f"Session ready: {session.name}",
                 )
             else:
                 session = await session_manager.create_session(message.from_user.id, name)
@@ -743,10 +759,9 @@ def setup_handlers(
                     user_id, name, topic_id=topic.message_thread_id,
                 )
                 await session_manager.set_claude_session_id(session.id, claude_session_id)
-                await callback.message.bot.send_message(
-                    chat.id,
-                    f"Connected: {name}",
-                    message_thread_id=topic.message_thread_id,
+                await _send_topic_welcome(
+                    callback.message.bot, chat.id, topic.message_thread_id,
+                    session.id, f"Connected: {name}",
                 )
                 await callback.answer(f"Topic: {name}")
                 try:
@@ -810,9 +825,10 @@ def setup_handlers(
                     user_id, name, topic_id=topic.message_thread_id,
                 )
                 await session_manager.set_claude_session_id(session.id, claude_session_id)
-            await bot.send_message(
-                chat.id, f"Topic recreated: {name}",
-                message_thread_id=topic.message_thread_id,
+            sid = existing.id if existing else session.id
+            await _send_topic_welcome(
+                bot, chat.id, topic.message_thread_id,
+                sid, f"Topic recreated: {name}",
             )
             await callback.answer("Topic recreated")
             try:
@@ -866,9 +882,9 @@ def setup_handlers(
                     user_id, f"fork: {name}", topic_id=topic.message_thread_id,
                 )
                 await session_manager.set_claude_session_id(session.id, new_claude_id)
-                await callback.message.bot.send_message(
-                    chat.id, f"Cloned: {name}\nSame history, independent from now.",
-                    message_thread_id=topic.message_thread_id,
+                await _send_topic_welcome(
+                    callback.message.bot, chat.id, topic.message_thread_id,
+                    session.id, f"Cloned: {name}\nSame history, independent from now.",
                 )
                 await callback.answer("Cloned!")
                 try:
@@ -887,6 +903,20 @@ def setup_handlers(
                 await callback.message.edit_text("Cancelled.")
             except Exception:
                 pass
+
+    # rename_topic:<session_id>:<topic_id> — prompts user, next text message becomes new name
+    _pending_renames: dict[int, tuple[str, int]] = {}  # user_id -> (session_id, topic_id)
+
+    @r.callback_query(F.data.startswith("rename_topic:"))
+    async def cb_rename_topic(callback: CallbackQuery) -> None:
+        assert callback.from_user and callback.data
+        parts = callback.data.split(":")
+        session_id = parts[1]
+        topic_id = int(parts[2])
+        _pending_renames[callback.from_user.id] = (session_id, topic_id)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer("Send the new name for this topic:")
 
     # Bot-managed commands
     _bot_commands = {
@@ -982,4 +1012,23 @@ def setup_handlers(
         if message.text and _is_bot_command(message.text):
             return
         assert message.from_user and message.text
+
+        # Handle pending topic rename
+        rename_info = _pending_renames.pop(message.from_user.id, None)
+        if rename_info:
+            session_id, topic_id = rename_info
+            new_name = message.text.strip()[:128]
+            try:
+                await session_manager.rename_session(
+                    message.from_user.id, session_id, new_name,
+                )
+                if message.bot and message.chat.is_forum:
+                    await message.bot.edit_forum_topic(
+                        message.chat.id, topic_id, name=new_name,
+                    )
+                await message.answer(f"Renamed to: {new_name}")
+            except Exception as e:
+                await message.answer(f"Rename failed: {e}")
+            return
+
         await _process_with_queue(message, message.text)
