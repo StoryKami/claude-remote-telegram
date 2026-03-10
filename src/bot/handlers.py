@@ -11,7 +11,7 @@ import uuid
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from aiogram import Bot, Router, F
 from aiogram.exceptions import TelegramRetryAfter
@@ -129,6 +129,15 @@ def setup_handlers(
     """Register all handlers with dependencies injected."""
 
     tmp_dir = workspace_path / "_tmp" / "telegram"
+
+    async def _reply(message: Message, text: str, **kwargs: Any) -> Message:
+        """Reply preserving message_thread_id even when is_topic_message is False."""
+        return await message.bot.send_message(
+            chat_id=message.chat.id,
+            text=text,
+            message_thread_id=message.message_thread_id,
+            **kwargs,
+        )
 
     async def _send_topic_welcome(
         bot: Bot, chat_id: int, topic_id: int, session_id: str, text: str,
@@ -337,7 +346,7 @@ def setup_handlers(
                 InlineKeyboardButton(text="Allow", callback_data=f"perm_allow:{fut_id}"),
                 InlineKeyboardButton(text="Deny", callback_data=f"perm_deny:{fut_id}"),
             ]])
-            await message.answer(
+            await _reply(message,
                 f"Permission request:\n{desc}",
                 reply_markup=keyboard,
             )
@@ -423,20 +432,20 @@ def setup_handlers(
                         await tracker.finalize(f"⚠️ Context overflow — compacting...")
                         try:
                             result = await bridge.compact_session(session.claude_session_id)
-                            await message.answer(f"🗜 Auto-compacted: {result[:200]}")
+                            await _reply(message,f"🗜 Auto-compacted: {result[:200]}")
                             _session_last_pct_notified.pop(session.id, None)
                             # Retry the original prompt
-                            await message.answer("🔄 Retrying...")
+                            await _reply(message,"🔄 Retrying...")
                             await _process_prompt(message, session, prompt)
                         except Exception:
                             logger.exception("Auto-compact retry failed")
-                            await message.answer("❌ Auto-compact failed. Try /compact manually.")
+                            await _reply(message,"❌ Auto-compact failed. Try /compact manually.")
                         return
 
                     ticker_task.cancel()
                     logger.error("CLI error: %s", event.data[:500])
                     await tracker.finalize(f"❌ Error ({tracker.elapsed()}s)")
-                    await message.answer("Error: Claude CLI encountered an error. Check logs for details.")
+                    await _reply(message,"Error: Claude CLI encountered an error. Check logs for details.")
                     return
 
                 elif event.type == "usage":
@@ -482,17 +491,17 @@ def setup_handlers(
                             last_bracket = _session_last_pct_notified.get(session.id, 0)
                             if bracket != last_bracket and bracket >= 10:
                                 _session_last_pct_notified[session.id] = bracket
-                                await message.answer(
+                                await _reply(message,
                                     f"📊 Context: {pct}% ({input_tokens:,} / {ctx_window:,} tokens)"
                                 )
 
                         # Auto-compact at threshold
                         if pct >= AUTO_COMPACT_THRESHOLD * 100 and session.claude_session_id:
-                            await message.answer(
+                            await _reply(message,
                                 f"⚠️ Context {pct}% ({input_tokens:,}/{ctx_window:,}) — auto compacting..."
                             )
                             result = await bridge.compact_session(session.claude_session_id)
-                            await message.answer(f"Compacted: {result[:200]}")
+                            await _reply(message,f"Compacted: {result[:200]}")
                             _session_last_pct_notified.pop(session.id, None)
                     except Exception:
                         logger.debug("Failed to parse usage event", exc_info=True)
@@ -517,12 +526,12 @@ def setup_handlers(
             if accumulated_text:
                 chunks = format_telegram_message(accumulated_text)
                 for chunk in chunks:
-                    await message.answer(chunk)
+                    await _reply(message,chunk)
             return
         except Exception as e:
             logger.exception("Error processing message")
             await tracker.finalize(f"❌ Error ({tracker.elapsed()}s)")
-            await message.answer("Error: something went wrong. Check logs for details.")
+            await _reply(message,"Error: something went wrong. Check logs for details.")
             return
         finally:
             if not ticker_task.done():
@@ -551,10 +560,10 @@ def setup_handlers(
         chunks = format_telegram_message(final_text)
         for chunk in chunks:
             try:
-                await message.answer(chunk)
+                await _reply(message,chunk)
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after)
-                await message.answer(chunk)
+                await _reply(message,chunk)
 
     async def _resolve_session(message: Message) -> "Session":
         """Resolve session from topic (group) or active session (DM)."""
@@ -583,7 +592,7 @@ def setup_handlers(
         if lock.locked():
             queue = _message_queues.setdefault(session.id, deque(maxlen=10))
             queue.append((message, prompt))
-            await message.answer(f"Queued (#{len(queue)}). Will process after current task.")
+            await _reply(message,f"Queued (#{len(queue)}). Will process after current task.")
             return
 
         async with lock:
@@ -605,11 +614,11 @@ def setup_handlers(
 
     @r.message(CommandStart())
     async def cmd_start(message: Message) -> None:
-        await message.answer(WELCOME_TEXT, parse_mode="Markdown")
+        await _reply(message,WELCOME_TEXT, parse_mode="Markdown")
 
     @r.message(Command("help"))
     async def cmd_help(message: Message) -> None:
-        await message.answer(HELP_TEXT, parse_mode="Markdown")
+        await _reply(message,HELP_TEXT, parse_mode="Markdown")
 
     @r.message(Command("new"))
     async def cmd_new(message: Message) -> None:
@@ -630,18 +639,18 @@ def setup_handlers(
                 )
             else:
                 session = await session_manager.create_session(message.from_user.id, name)
-                await message.answer(
+                await _reply(message,
                     f"Created session: {session.name} ({session.id})\nNew Claude session (no history).",
                 )
         except ValueError as e:
-            await message.answer(str(e))
+            await _reply(message,str(e))
 
     @r.message(Command("sessions"))
     async def cmd_sessions(message: Message) -> None:
         assert message.from_user
         sessions = await session_manager.get_user_sessions(message.from_user.id)
         if not sessions:
-            await message.answer("No sessions. Send a message to start one.")
+            await _reply(message,"No sessions. Send a message to start one.")
             return
 
         buttons = []
@@ -653,7 +662,7 @@ def setup_handlers(
                 text=label, callback_data=f"switch:{s.id}"
             )])
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await message.answer("Your sessions:", reply_markup=keyboard)
+        await _reply(message,"Your sessions:", reply_markup=keyboard)
 
     @r.callback_query(F.data.startswith("switch:"))
     async def cb_switch(callback: CallbackQuery) -> None:
@@ -669,7 +678,7 @@ def setup_handlers(
                 try:
                     await callback.message.edit_text(text)
                 except Exception:
-                    await callback.message.answer(text)
+                    await _reply(callback.message,text)
         except ValueError as e:
             await callback.answer(str(e), show_alert=True)
 
@@ -678,18 +687,18 @@ def setup_handlers(
         assert message.from_user
         session_id = _cmd_arg(message.text, "switch")
         if not session_id:
-            await message.answer("Usage: /switch <session_id>")
+            await _reply(message,"Usage: /switch <session_id>")
             return
         try:
             session = await session_manager.switch_session(
                 message.from_user.id, session_id
             )
-            await message.answer(
+            await _reply(message,
                 f"Switched to: **{session.name}** (`{session.id}`)",
                 parse_mode="Markdown",
             )
         except ValueError as e:
-            await message.answer(str(e))
+            await _reply(message,str(e))
 
     @r.message(Command("current"))
     async def cmd_current(message: Message) -> None:
@@ -704,14 +713,14 @@ def setup_handlers(
             f"Mode: **{mode}**\n"
             f"Created: {session.created_at.strftime('%Y-%m-%d %H:%M')}"
         )
-        await message.answer(text, parse_mode="Markdown")
+        await _reply(message,text, parse_mode="Markdown")
 
     @r.message(Command("rename"))
     async def cmd_rename(message: Message) -> None:
         assert message.from_user
         name = _cmd_arg(message.text, "rename")
         if not name:
-            await message.answer("Usage: /rename <new name>")
+            await _reply(message,"Usage: /rename <new name>")
             return
         session = await _resolve_session(message)
         await session_manager.rename_session(message.from_user.id, session.id, name)
@@ -723,14 +732,14 @@ def setup_handlers(
                 )
             except Exception:
                 pass
-        await message.answer(f"Renamed to: {name}")
+        await _reply(message,f"Renamed to: {name}")
 
     @r.message(Command("delete"))
     async def cmd_delete(message: Message) -> None:
         assert message.from_user
         session_id = _cmd_arg(message.text, "delete")
         if not session_id:
-            await message.answer("Usage: /delete <session_id>")
+            await _reply(message,"Usage: /delete <session_id>")
             return
         try:
             await session_manager.delete_session(message.from_user.id, session_id)
@@ -738,9 +747,9 @@ def setup_handlers(
             _session_locks.pop(session_id, None)
             _cancel_flags.pop(session_id, None)
             _message_queues.pop(session_id, None)
-            await message.answer(f"Deleted session: {session_id}")
+            await _reply(message,f"Deleted session: {session_id}")
         except ValueError as e:
-            await message.answer(str(e))
+            await _reply(message,str(e))
 
     @r.message(Command("cancel"))
     async def cmd_cancel(message: Message) -> None:
@@ -749,7 +758,7 @@ def setup_handlers(
         _cancel_flags[session.id] = True
         _message_queues.pop(session.id, None)
         bridge.request_cancel(session.id)
-        await message.answer("Cancelling... (queue cleared)")
+        await _reply(message,"Cancelling... (queue cleared)")
 
     async def _git(args: list[str], cwd: str | None = None) -> str:
         """Run a git command and return stdout."""
@@ -786,7 +795,7 @@ def setup_handlers(
             await _git(["reset", "--hard", f"HEAD~{n}"], cwd=project_dir)
             await _git(["clean", "-fd"], cwd=project_dir)
         except Exception as e:
-            await message.answer(f"Revert failed: {e}")
+            await _reply(message,f"Revert failed: {e}")
             return
 
         parts = [f"Reverted {n} commit(s)."]
@@ -795,19 +804,19 @@ def setup_handlers(
         if dirty:
             parts.append(f"<b>+ uncommitted changes cleared</b>")
 
-        await message.answer("\n".join(parts), parse_mode="HTML")
+        await _reply(message,"\n".join(parts), parse_mode="HTML")
 
     @r.message(Command("compact"))
     async def cmd_compact(message: Message) -> None:
         assert message.from_user
         session = await _resolve_session(message)
         if not session.claude_session_id:
-            await message.answer("No active Claude session to compact.")
+            await _reply(message,"No active Claude session to compact.")
             return
-        await message.answer("Compacting...")
+        await _reply(message,"Compacting...")
         result = await bridge.compact_session(session.claude_session_id)
         _session_last_pct_notified.pop(session.id, None)
-        await message.answer(f"Done: {result[:500]}")
+        await _reply(message,f"Done: {result[:500]}")
 
     @r.message(Command("status"))
     async def cmd_status(message: Message) -> None:
@@ -857,7 +866,7 @@ def setup_handlers(
             f"<b>Output:</b> {output_tokens:,} tokens",
             f"<b>Cost:</b> ${cost:.4f}" if cost else "<b>Cost:</b> —",
         ]
-        await message.answer("\n".join(lines), parse_mode="HTML")
+        await _reply(message,"\n".join(lines), parse_mode="HTML")
 
     @r.message(Command("context"))
     async def cmd_context(message: Message) -> None:
@@ -867,10 +876,10 @@ def setup_handlers(
 
         if arg in ("on", "1"):
             _context_notify[user_id] = True
-            await message.answer("Context notifications: ON\nWill notify at every 10% usage.")
+            await _reply(message,"Context notifications: ON\nWill notify at every 10% usage.")
         elif arg in ("off", "0"):
             _context_notify[user_id] = False
-            await message.answer("Context notifications: OFF")
+            await _reply(message,"Context notifications: OFF")
         else:
             # Show current context info
             session = await _resolve_session(message)
@@ -882,7 +891,7 @@ def setup_handlers(
             pct = int(tokens / ctx_window * 100) if ctx_window else 0
             notify_status = "ON" if _context_notify.get(user_id, False) else "OFF"
             effort = _user_effort.get(user_id, "high")
-            await message.answer(
+            await _reply(message,
                 f"📊 Context: {pct}% ({tokens:,} / {ctx_window:,} tokens)\n"
                 f"Model: {ctx_model or 'default'} | Effort: {effort}\n"
                 f"Notifications: {notify_status}\n\n"
@@ -896,7 +905,7 @@ def setup_handlers(
         assert message.from_user
         session = await _resolve_session(message)
         await session_manager.close_session(session.id)
-        await message.answer(f"Session closed: {session.name}\nUse /reopen to resume later.")
+        await _reply(message,f"Session closed: {session.name}\nUse /reopen to resume later.")
 
     @r.message(Command("reopen"))
     async def cmd_reopen(message: Message) -> None:
@@ -907,9 +916,9 @@ def setup_handlers(
             session = await session_manager.get_session_by_topic(topic_id)
             if session:
                 await session_manager.reopen_session(session.id)
-                await message.answer(f"Session reopened: {session.name}")
+                await _reply(message,f"Session reopened: {session.name}")
                 return
-        await message.answer("No closed session found for this topic.")
+        await _reply(message,"No closed session found for this topic.")
 
     def _save_restart_chat(message: Message) -> None:
         """Save chat info so restart notification goes to the right place."""
@@ -935,7 +944,7 @@ def setup_handlers(
         logger.info("/restart raw keys: %s", list(raw.keys()))
         if "reply_to_message" in raw:
             logger.info("/restart reply_to_message: %s", {k: v for k, v in raw["reply_to_message"].items() if k in ("message_id", "message_thread_id", "forum_topic_created", "is_topic_message")})
-        await message.answer("Restarting bot...")
+        await _reply(message,"Restarting bot...")
         _save_restart_chat(message)
         logger.info("Restart requested by user %d", message.from_user.id)
         await asyncio.sleep(0.5)
@@ -961,9 +970,9 @@ def setup_handlers(
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
             output = (stdout or stderr or b"").decode("utf-8", errors="replace").strip() or "(no output)"
-            await message.answer(f"`{output}`\n\nRestarting...", parse_mode="Markdown")
+            await _reply(message,f"`{output}`\n\nRestarting...", parse_mode="Markdown")
         except Exception as e:
-            await message.answer(f"Git pull failed: {e}")
+            await _reply(message,f"Git pull failed: {e}")
             return
         _save_restart_chat(message)
         logger.info("Pull + restart requested by user %d", message.from_user.id)
@@ -979,7 +988,7 @@ def setup_handlers(
         if arg:
             _set_mode(user_id, arg)
             desc = _MODE_DESCRIPTIONS.get(_user_modes.get(user_id, "code"), "")
-            await message.answer(f"Mode: {_user_modes.get(user_id, 'code')}\n{desc}")
+            await _reply(message,f"Mode: {_user_modes.get(user_id, 'code')}\n{desc}")
         else:
             current = _user_modes.get(user_id, "code")
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -998,7 +1007,7 @@ def setup_handlers(
                     ),
                 ],
             ])
-            await message.answer(
+            await _reply(message,
                 f"Current mode: {current}\n\n"
                 "code = full access (default)\n"
                 "safe = asks permission before tools\n"
@@ -1100,7 +1109,7 @@ def setup_handlers(
     async def cmd_model(message: Message) -> None:
         assert message.from_user
         user_id = message.from_user.id
-        await message.answer(
+        await _reply(message,
             _model_settings_text(user_id),
             parse_mode="HTML",
             reply_markup=_model_keyboard(user_id),
@@ -1209,7 +1218,7 @@ def setup_handlers(
         """List Claude Code sessions from the local machine."""
         assert message.from_user
         if not CLAUDE_PROJECTS_DIR.exists():
-            await message.answer("No local Claude sessions found.")
+            await _reply(message,"No local Claude sessions found.")
             return
 
         # Collect (path, mtime) first, sort globally, open only top 10
@@ -1224,7 +1233,7 @@ def setup_handlers(
                     continue
 
         if not all_files:
-            await message.answer("No local Claude sessions found.")
+            await _reply(message,"No local Claude sessions found.")
             return
 
         all_files.sort(key=lambda x: x[1], reverse=True)
@@ -1270,7 +1279,7 @@ def setup_handlers(
             ])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await message.answer("\n".join(lines), reply_markup=keyboard, parse_mode="HTML")
+        await _reply(message,"\n".join(lines), reply_markup=keyboard, parse_mode="HTML")
 
     def _peek_session(session_id: str) -> str:
         """Read last few user/assistant messages from a local session JSONL."""
@@ -1327,9 +1336,9 @@ def setup_handlers(
         preview = await asyncio.to_thread(_peek_session, session_id)
         if callback.message:
             try:
-                await callback.message.answer(preview, parse_mode="Markdown")
+                await _reply(callback.message,preview, parse_mode="Markdown")
             except Exception:
-                await callback.message.answer(preview)
+                await _reply(callback.message,preview)
         await callback.answer()
 
     @r.callback_query(F.data.startswith("local:"))
@@ -1411,7 +1420,7 @@ def setup_handlers(
         try:
             await callback.message.edit_text(text)
         except Exception:
-            await callback.message.answer(text)
+            await _reply(callback.message,text)
 
     @r.callback_query(F.data.startswith("local_continue:"))
     async def cb_local_continue(callback: CallbackQuery) -> None:
@@ -1594,7 +1603,7 @@ def setup_handlers(
         _pending_renames[callback.from_user.id] = (session_id, topic_id, chat_id)
         await callback.answer()
         if callback.message:
-            await callback.message.answer("Send the new name for this topic:")
+            await _reply(callback.message,"Send the new name for this topic:")
 
     # --- Topic lifecycle ---
 
@@ -1650,7 +1659,7 @@ def setup_handlers(
         try:
             filepath = await _save_telegram_file(message.bot, photo.file_id, ".jpg")
         except Exception as e:
-            await message.answer(f"Failed to download image: {e}")
+            await _reply(message,f"Failed to download image: {e}")
             return
 
         group_id = message.media_group_id
@@ -1691,7 +1700,7 @@ def setup_handlers(
         try:
             filepath = await _save_telegram_file(message.bot, doc.file_id, ext)
         except Exception as e:
-            await message.answer(f"Failed to download file: {e}")
+            await _reply(message,f"Failed to download file: {e}")
             return
 
         caption = message.caption or f"Please analyze this file: {filename}"
@@ -1717,9 +1726,9 @@ def setup_handlers(
                     await message.bot.edit_forum_topic(
                         message.chat.id, topic_id, name=new_name,
                     )
-                await message.answer(f"Renamed to: {new_name}")
+                await _reply(message,f"Renamed to: {new_name}")
             except Exception as e:
-                await message.answer(f"Rename failed: {e}")
+                await _reply(message,f"Rename failed: {e}")
             return
 
         await _process_with_queue(message, message.text)
