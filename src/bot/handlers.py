@@ -254,6 +254,46 @@ def setup_handlers(
 
         permission_cb = _ask_permission if mode == "safe" else None
 
+        # Group tracking: each "thought + tool calls" = one group
+        # When new text arrives after tool results, flush previous group as a message
+        group_text = ""
+        group_tools: list[tuple[str, int]] = []  # (desc, elapsed)
+        had_tools = False  # True if current group has any tools
+
+        async def _flush_group() -> None:
+            """Send current group as an expandable message."""
+            nonlocal group_text, group_tools, had_tools
+            if not group_text and not group_tools:
+                return
+            lines: list[str] = []
+            if group_text:
+                escaped = group_text.replace("<", "&lt;").replace(">", "&gt;")
+                lines.append(escaped)
+            if group_tools:
+                lines.append("")
+                for desc, t in group_tools:
+                    lines.append(f"✓ {desc} ({t}s)")
+            html = "\n".join(lines)
+            try:
+                await message.answer(
+                    f'<blockquote expandable>{html}</blockquote>',
+                    parse_mode="HTML",
+                )
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+                try:
+                    await message.answer(
+                        f'<blockquote expandable>{html}</blockquote>',
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            group_text = ""
+            group_tools = []
+            had_tools = False
+
         try:
             async for event in bridge.send_message(
                 prompt=prompt,
@@ -267,23 +307,27 @@ def setup_handlers(
 
                 if event.type == "thinking":
                     accumulated_thinking += event.data
-                    # Show thinking snippet in tracker (last 150 chars for real-time)
                     snippet = accumulated_thinking[-150:].replace("\n", " ").strip()
                     tracker.phase = "Thinking..."
                     tracker.last_text = f"💭 {snippet}"
 
                 elif event.type == "text":
+                    # New text after tools = flush previous group, start new
+                    if had_tools:
+                        await _flush_group()
                     accumulated_text += event.data
+                    group_text += event.data
                     tracker.phase = "Writing..."
-                    # Show latest text snippet as Claude's utterance
-                    tracker.last_text = accumulated_text[-200:]
+                    tracker.last_text = group_text[-200:]
 
                 elif event.type == "tool_use":
+                    had_tools = True
                     tracker.phase = "Working..."
                     tracker.current_tool = event.data
                     await tracker.refresh()
 
                 elif event.type == "tool_result":
+                    group_tools.append((tracker.current_tool or "?", tracker.elapsed()))
                     tracker.steps.append((tracker.current_tool or "?", tracker.elapsed()))
                     tracker.current_tool = ""
                     await tracker.refresh()
@@ -305,26 +349,19 @@ def setup_handlers(
 
         except asyncio.CancelledError:
             ticker_task.cancel()
-            # Keep progress info instead of just "Cancelled"
+            # Flush any pending group
+            await _flush_group()
             elapsed = tracker.elapsed()
-            log_lines = ["⛔ Stopped"]
+            log_lines = [f"⛔ Stopped ({elapsed}s)"]
             if accumulated_thinking:
                 thinking_text = accumulated_thinking.replace("\n", " ").strip()
                 log_lines.append(f"\n💭 {thinking_text}")
-            for step_name, step_time in tracker.steps:
-                log_lines.append(f"✓ {step_name} ({step_time}s)")
-            log_lines.append(f"\n⏱ {elapsed}s")
-            log_html = "\n".join(log_lines)
             try:
                 await status_msg.edit_text(
-                    f'<blockquote expandable>{log_html}</blockquote>',
-                    parse_mode="HTML", reply_markup=None,
+                    "\n".join(log_lines), reply_markup=None,
                 )
             except Exception:
-                try:
-                    await status_msg.edit_text(f"Stopped. ({elapsed}s)")
-                except Exception:
-                    pass
+                pass
             if accumulated_text:
                 chunks = format_telegram_message(accumulated_text)
                 for chunk in chunks:
@@ -342,46 +379,52 @@ def setup_handlers(
             await status_msg.edit_text("(no response)")
             return
 
-        # Build process log as expandable summary above the response
-        total_elapsed = tracker.elapsed()
-        log_lines: list[str] = []
-        if accumulated_thinking:
-            # Full thinking in expandable — no truncation needed
-            thinking_text = accumulated_thinking.replace("\n", " ").strip()
-            log_lines.append(f"💭 {thinking_text}")
-            log_lines.append("")
-        for step_name, step_time in tracker.steps:
-            log_lines.append(f"✓ {step_name} ({step_time}s)")
-        log_lines.append(f"\n⏱ {total_elapsed}s")
+        # Flush last intermediate group (if it had tools)
+        # The remaining group_text without tools = final answer
+        if group_tools:
+            # Last group had tools — flush it, final answer is empty
+            await _flush_group()
 
-        if log_lines:
-            log_html = "\n".join(log_lines)
+        # Convert status_msg to summary
+        total_elapsed = tracker.elapsed()
+        summary_lines: list[str] = []
+        if accumulated_thinking:
+            thinking_text = accumulated_thinking.replace("\n", " ").strip()
+            summary_lines.append(f"💭 {thinking_text}")
+            summary_lines.append("")
+        for step_name, step_time in tracker.steps:
+            summary_lines.append(f"✓ {step_name} ({step_time}s)")
+        summary_lines.append(f"\n⏱ {total_elapsed}s")
+
+        summary_html = "\n".join(summary_lines)
+        try:
+            await status_msg.edit_text(
+                f'<blockquote expandable>{summary_html}</blockquote>',
+                parse_mode="HTML", reply_markup=None,
+            )
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
             try:
                 await status_msg.edit_text(
-                    f'<blockquote expandable>{log_html}</blockquote>',
-                    parse_mode="HTML",
-                    reply_markup=None,
+                    f'<blockquote expandable>{summary_html}</blockquote>',
+                    parse_mode="HTML", reply_markup=None,
                 )
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after)
-                try:
-                    await status_msg.edit_text(
-                        f'<blockquote expandable>{log_html}</blockquote>',
-                        parse_mode="HTML",
-                        reply_markup=None,
-                    )
-                except Exception:
-                    pass
             except Exception:
-                pass  # keep the message, don't delete
+                pass
+        except Exception:
+            pass
 
-        chunks = format_telegram_message(accumulated_text)
-        for chunk in chunks:
-            try:
-                await message.answer(chunk)
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after)
-                await message.answer(chunk)
+        # Send final answer (clean, no intermediate steps)
+        # If last group had no tools, group_text IS the final answer
+        final_text = group_text if not had_tools else accumulated_text
+        if final_text:
+            chunks = format_telegram_message(final_text.strip())
+            for chunk in chunks:
+                try:
+                    await message.answer(chunk)
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after)
+                    await message.answer(chunk)
 
     async def _resolve_session(message: Message) -> "Session":
         """Resolve session from topic (group) or active session (DM)."""
