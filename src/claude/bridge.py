@@ -12,6 +12,7 @@ from claude_code_sdk import (
     ClaudeCodeOptions,
     AssistantMessage,
     ResultMessage,
+    UserMessage,
     PermissionResultAllow,
     PermissionResultDeny,
     TextBlock,
@@ -115,6 +116,10 @@ class ClaudeBridge:
                         elif isinstance(block, ToolResultBlock):
                             content = block.content if isinstance(block.content, str) else str(block.content)[:200]
                             yield StreamEvent("tool_result", content)
+
+                elif isinstance(message, UserMessage):
+                    # Tool results come as UserMessage
+                    yield StreamEvent("tool_result", "")
 
                 elif isinstance(message, ResultMessage):
                     result_session_id = message.session_id
