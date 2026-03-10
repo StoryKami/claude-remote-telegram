@@ -95,12 +95,16 @@ class ClaudeBridge:
 
         logger.info("SDK query: mode=%s resume=%s", mode, claude_session_id)
 
+        cancelled = False
+
         try:
             async for message in query(prompt=prompt, options=options):
-                # Check cancel
+                # Check cancel — don't break, just stop yielding
                 if cancel_event.is_set():
-                    logger.info("Query cancelled for key=%s", process_key)
-                    break
+                    if not cancelled:
+                        logger.info("Query cancelled for key=%s", process_key)
+                        cancelled = True
+                    continue
 
                 logger.debug("SDK message: %s blocks=%s",
                     type(message).__name__,
@@ -135,6 +139,15 @@ class ClaudeBridge:
                     if cost:
                         accumulated_text += f"\n\n[Cost: ${cost:.4f}]"
 
+        except GeneratorExit:
+            pass
+        except RuntimeError as e:
+            if "cancel scope" in str(e):
+                logger.warning("SDK cancel scope issue (suppressed): %s", e)
+            else:
+                logger.exception("SDK runtime error")
+                yield StreamEvent("error", str(e))
+                return
         except Exception as e:
             logger.exception("SDK query error")
             yield StreamEvent("error", str(e))
