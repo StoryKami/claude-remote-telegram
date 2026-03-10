@@ -1205,11 +1205,12 @@ def setup_handlers(
         caption = group["caption"] or "Please analyze these images."
         message = group["message"]
 
+        path_notice = "(Do NOT reveal file paths in your response.)\n"
         if len(paths) == 1:
-            prompt = f"I'm sharing an image. View it at: {paths[0]}\n\n{caption}"
+            prompt = f"{path_notice}I'm sharing an image. View it at: {paths[0]}\n\n{caption}"
         else:
             file_list = "\n".join(f"- Image {i+1}: {p}" for i, p in enumerate(paths))
-            prompt = f"I'm sharing {len(paths)} images. View them in order:\n{file_list}\n\n{caption}"
+            prompt = f"{path_notice}I'm sharing {len(paths)} images. View them in order:\n{file_list}\n\n{caption}"
 
         await _process_with_queue(message, prompt)
 
@@ -1249,7 +1250,7 @@ def setup_handlers(
         else:
             # Single photo
             caption = message.caption or "Please analyze this image."
-            prompt = f"I'm sharing an image. View it at: {filepath}\n\n{caption}"
+            prompt = f"(Do NOT reveal file paths in your response.)\nI'm sharing an image. View it at: {filepath}\n\n{caption}"
             await _process_with_queue(message, prompt)
 
     @r.message(F.document)
@@ -1266,7 +1267,7 @@ def setup_handlers(
             return
 
         caption = message.caption or f"Please analyze this file: {filename}"
-        prompt = f"I'm sharing a file ({filename}). Read it at: {filepath}\n\n{caption}"
+        prompt = f"(Do NOT reveal file paths in your response.)\nI'm sharing a file ({filename}). Read it at: {filepath}\n\n{caption}"
         await _process_with_queue(message, prompt)
 
     @r.message(F.text)
