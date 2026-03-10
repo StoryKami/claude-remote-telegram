@@ -63,6 +63,15 @@ def _is_valid_session_id(sid: str) -> bool:
     return bool(_SESSION_ID_RE.match(sid))
 
 
+def _cmd_arg(text: str | None, command: str) -> str:
+    """Extract argument from a /command@botname message."""
+    if not text:
+        return ""
+    # Remove /command and optional @botname suffix
+    parts = text.split(None, 1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
 def _get_session_lock(session_id: str) -> asyncio.Lock:
     return _session_locks.setdefault(session_id, asyncio.Lock())
 
@@ -463,7 +472,7 @@ def setup_handlers(
     @r.message(Command("new"))
     async def cmd_new(message: Message) -> None:
         assert message.from_user and message.bot
-        name = (message.text or "").replace("/new", "").strip() or "untitled"
+        name = _cmd_arg(message.text, "new") or "untitled"
         chat = message.chat
         logger.info("cmd_new: chat.id=%s chat.type=%s is_forum=%s", chat.id, chat.type, chat.is_forum)
         try:
@@ -525,7 +534,7 @@ def setup_handlers(
     @r.message(Command("switch"))
     async def cmd_switch(message: Message) -> None:
         assert message.from_user
-        session_id = (message.text or "").replace("/switch", "").strip()
+        session_id = _cmd_arg(message.text, "switch")
         if not session_id:
             await message.answer("Usage: /switch <session_id>")
             return
@@ -558,7 +567,7 @@ def setup_handlers(
     @r.message(Command("rename"))
     async def cmd_rename(message: Message) -> None:
         assert message.from_user
-        name = (message.text or "").replace("/rename", "").strip()
+        name = _cmd_arg(message.text, "rename")
         if not name:
             await message.answer("Usage: /rename <new name>")
             return
@@ -577,7 +586,7 @@ def setup_handlers(
     @r.message(Command("delete"))
     async def cmd_delete(message: Message) -> None:
         assert message.from_user
-        session_id = (message.text or "").replace("/delete", "").strip()
+        session_id = _cmd_arg(message.text, "delete")
         if not session_id:
             await message.answer("Usage: /delete <session_id>")
             return
@@ -665,7 +674,7 @@ def setup_handlers(
     async def cmd_mode(message: Message) -> None:
         assert message.from_user
         user_id = message.from_user.id
-        arg = (message.text or "").replace("/mode", "").strip().lower()
+        arg = _cmd_arg(message.text, "mode").lower()
 
         if arg:
             _set_mode(user_id, arg)
