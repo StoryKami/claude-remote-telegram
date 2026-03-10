@@ -135,19 +135,19 @@ def setup_handlers(
         return dest
 
     class _StatusTracker:
-        """Tracks and renders the status message with 1s spinner refresh."""
+        """Live status at the bottom of chat. Deletes+resends to stay at bottom."""
 
         FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-        def __init__(self, status_msg: Message, session_id: str, start: float) -> None:
-            self.msg = status_msg
+        def __init__(self, message: Message, session_id: str, start: float) -> None:
+            self._chat_msg = message  # original user message (for .answer())
+            self.msg: Message | None = None  # current status message
             self.session_id = session_id
             self.start = start
             self.phase = "Thinking..."
             self.hint = ""
-            self.last_text = ""
             self.current_tool = ""
-            self.steps: list[tuple[str, int]] = []
+            self.steps: list[tuple[str, int]] = []  # all steps for final log
             self._frame_idx = 0
             self._last_rendered = ""
             self._stop_kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -163,21 +163,19 @@ def setup_handlers(
             spinner = self.FRAMES[self._frame_idx % len(self.FRAMES)]
             self._frame_idx += 1
 
-            header = f"{spinner} {self.phase} ({e}s)"
-            parts = [header]
+            parts: list[str] = []
 
-            if self.hint and not self.steps and not self.last_text:
-                parts.append(f"\n&gt; {self.hint}")
+            # Current action
+            if self.current_tool:
+                parts.append(f"{spinner} ⏳ {self.current_tool}")
+            else:
+                parts.append(f"{spinner} {self.phase}")
 
-            if self.last_text:
-                preview = self.last_text[-200:].replace("<", "&lt;").replace(">", "&gt;")
-                parts.append(f"\n💬 {preview}")
+            if self.hint and not self.current_tool:
+                parts.append(f"&gt; {self.hint}")
 
-            if self.steps or self.current_tool:
-                log_lines = [f"✓ {name} ({t}s)" for name, t in self.steps[-6:]]
-                if self.current_tool:
-                    log_lines.append(f"⏳ {self.current_tool}")
-                parts.append(f'\n<blockquote expandable>{chr(10).join(log_lines)}</blockquote>')
+            # Elapsed at the end
+            parts.append(f"\n⏱ {e}s")
 
             return "\n".join(parts)
 
@@ -186,12 +184,29 @@ def setup_handlers(
             if html == self._last_rendered:
                 return
             self._last_rendered = html
+            # Delete old status and send new one at bottom
+            if self.msg:
+                try:
+                    await self.msg.delete()
+                except Exception:
+                    pass
             try:
-                await self.msg.edit_text(html, parse_mode="HTML", reply_markup=self._stop_kb)
+                self.msg = await self._chat_msg.answer(
+                    html, parse_mode="HTML", reply_markup=self._stop_kb,
+                )
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after)
             except Exception:
                 pass
+
+        async def delete(self) -> None:
+            """Remove status message."""
+            if self.msg:
+                try:
+                    await self.msg.delete()
+                except Exception:
+                    pass
+                self.msg = None
 
     async def _run_status_ticker(tracker: _StatusTracker) -> None:
         """Refresh status message every 3 seconds to avoid Telegram rate limits."""
@@ -219,9 +234,8 @@ def setup_handlers(
             hint += "..."
 
         start_time = time.monotonic()
-        status_msg = await message.answer("⠋ Thinking... (0s)", parse_mode="HTML")
 
-        tracker = _StatusTracker(status_msg, session.id, start_time)
+        tracker = _StatusTracker(message, session.id, start_time)
         tracker.hint = hint
         if mode != "code":
             tracker.phase = f"[{mode}] Thinking..."
@@ -344,7 +358,8 @@ def setup_handlers(
                 elif event.type == "error":
                     ticker_task.cancel()
                     logger.error("CLI error: %s", event.data[:500])
-                    await status_msg.edit_text("Error: Claude CLI encountered an error. Check logs for details.")
+                    await tracker.delete()
+                    await message.answer("Error: Claude CLI encountered an error. Check logs for details.")
                     return
 
                 elif event.type == "done":
@@ -365,12 +380,8 @@ def setup_handlers(
             if accumulated_thinking:
                 thinking_text = accumulated_thinking.replace("\n", " ").strip()
                 log_lines.append(f"\n💭 {thinking_text}")
-            try:
-                await status_msg.edit_text(
-                    "\n".join(log_lines), reply_markup=None,
-                )
-            except Exception:
-                pass
+            await tracker.delete()
+            await message.answer("\n".join(log_lines))
             if accumulated_text:
                 chunks = format_telegram_message(accumulated_text)
                 for chunk in chunks:
@@ -378,30 +389,24 @@ def setup_handlers(
             return
         except Exception as e:
             logger.exception("Error processing message")
-            await status_msg.edit_text("Error: something went wrong. Check logs for details.")
+            await tracker.delete()
+            await message.answer("Error: something went wrong. Check logs for details.")
             return
         finally:
             if not ticker_task.done():
                 ticker_task.cancel()
 
         if not accumulated_text:
-            await status_msg.edit_text("(no response)")
+            await tracker.delete()
+            await message.answer("(no response)")
             return
 
         # Flush last intermediate group (if it had tools)
         if group_tools:
             await _flush_group()
 
-        # Remove the status message (groups are already sent as separate messages)
-        try:
-            await status_msg.delete()
-        except Exception:
-            # If delete fails, minimize it
-            try:
-                total = tracker.elapsed()
-                await status_msg.edit_text(f"⏱ {total}s", reply_markup=None)
-            except Exception:
-                pass
+        # Remove status message — groups are already sent
+        await tracker.delete()
 
         # Send final answer (clean)
         final_text = group_text if not had_tools else accumulated_text
