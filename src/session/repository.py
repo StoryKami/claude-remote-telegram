@@ -87,6 +87,15 @@ class SessionRepository:
         row = await cursor.fetchone()
         return _row_to_session(row) if row else None
 
+    async def get_session_by_claude_id(self, claude_session_id: str) -> Session | None:
+        assert self._db
+        cursor = await self._db.execute(
+            "SELECT * FROM sessions WHERE claude_session_id = ? ORDER BY updated_at DESC LIMIT 1",
+            (claude_session_id,),
+        )
+        row = await cursor.fetchone()
+        return _row_to_session(row) if row else None
+
     async def get_session_by_topic(self, topic_id: int) -> Session | None:
         assert self._db
         cursor = await self._db.execute(

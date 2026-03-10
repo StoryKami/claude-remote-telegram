@@ -90,6 +90,9 @@ class SessionManager:
             raise ValueError(f"Session not found: {session_id}")
         await self._repo.update_session(session_id, name=name)
 
+    async def find_by_claude_session_id(self, claude_session_id: str) -> Session | None:
+        return await self._repo.get_session_by_claude_id(claude_session_id)
+
     async def set_claude_session_id(self, session_id: str, claude_session_id: str) -> None:
         await self._repo.update_session(session_id, claude_session_id=claude_session_id)
 

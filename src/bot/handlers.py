@@ -698,6 +698,14 @@ def setup_handlers(
         else:
             name = f"local-{claude_session_id[:8]}"
 
+        # Check if this Claude session is already linked to a topic
+        existing = await session_manager.find_by_claude_session_id(claude_session_id)
+        if existing and existing.topic_id:
+            await callback.answer(
+                f"Already connected in topic: {existing.name}", show_alert=True,
+            )
+            return
+
         # In forum group: create a new topic for this local session
         if chat.is_forum and callback.message.bot:
             try:
