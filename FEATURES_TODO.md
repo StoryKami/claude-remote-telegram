@@ -43,6 +43,10 @@
 
 ## P0 — 즉시 구현 (사용성 핵심)
 
+### 토픽 이름 동기화
+- [ ] 사용자가 Telegram에서 토픽 이름을 수동 변경하면 DB의 session.name도 동기화
+- [ ] ChatMemberUpdated 또는 forum_topic_edited 이벤트 핸들링
+
 ### 음성 메시지 지원
 - [ ] Telegram 음성 메시지 → whisper/speech-to-text → Claude에 전달
 - [ ] (선택) Claude 응답 → TTS → 음성으로 회신
