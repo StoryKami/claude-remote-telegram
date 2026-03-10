@@ -476,7 +476,7 @@ def setup_handlers(
 
     def _save_restart_chat(message: Message) -> None:
         """Save chat info so restart notification goes to the right place."""
-        restart_file = workspace_path / "data" / ".restart_chat"
+        restart_file = Path(__file__).resolve().parent.parent.parent / "data" / ".restart_chat"
         restart_file.parent.mkdir(parents=True, exist_ok=True)
         restart_file.write_text(json.dumps({
             "chat_id": message.chat.id,
