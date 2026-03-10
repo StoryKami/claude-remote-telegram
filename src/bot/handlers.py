@@ -238,10 +238,12 @@ def setup_handlers(
                 elif event.type == "tool_use":
                     tracker.phase = "Working..."
                     tracker.current_tool = event.data
+                    await tracker.refresh()
 
                 elif event.type == "tool_result":
                     tracker.steps.append((tracker.current_tool or "?", tracker.elapsed()))
                     tracker.current_tool = ""
+                    await tracker.refresh()
 
                 elif event.type == "error":
                     ticker_task.cancel()
