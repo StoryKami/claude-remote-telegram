@@ -53,8 +53,11 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-4-6": 200_000,
     "claude-opus-4-6[1m]": 1_000_000,
     "claude-sonnet-4-6": 200_000,
+    "claude-sonnet-4-6[1m]": 1_000_000,
     "claude-haiku-4-5-20251001": 200_000,
 }
+# Models that support 1M extended context
+_1M_MODELS = {"claude-opus-4-6", "claude-sonnet-4-6"}
 DEFAULT_CONTEXT_WINDOW = 200_000
 AUTO_COMPACT_THRESHOLD = 0.85  # auto compact at 85%
 # Pending rename: user_id → (session_id, topic_id, chat_id)
@@ -1001,7 +1004,7 @@ def setup_handlers(
         ))
 
         # Row 2: 1M context toggle (only for opus)
-        can_1m = current_model in ("claude-opus-4-6", "default")
+        can_1m = current_model in _1M_MODELS or current_model == "default"
         ctx_label = "1M: ON ●" if ext_1m else "1M: OFF"
         ctx_buttons = [InlineKeyboardButton(
             text=ctx_label,
@@ -1047,8 +1050,8 @@ def setup_handlers(
                 _user_1m.pop(user_id, None)  # reset 1M on default
             elif value in AVAILABLE_MODELS:
                 _user_models[user_id] = AVAILABLE_MODELS[value]
-                # Only opus supports 1M — disable if switching away
-                if value != "opus":
+                # Disable 1M if model doesn't support it
+                if AVAILABLE_MODELS[value] not in _1M_MODELS:
                     _user_1m.pop(user_id, None)
 
                 # Check if context needs compact
