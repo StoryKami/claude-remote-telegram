@@ -377,7 +377,11 @@ def setup_handlers(
 
         chunks = format_telegram_message(accumulated_text)
         for chunk in chunks:
-            await message.answer(chunk)
+            try:
+                await message.answer(chunk)
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after)
+                await message.answer(chunk)
 
     async def _resolve_session(message: Message) -> "Session":
         """Resolve session from topic (group) or active session (DM)."""
@@ -411,12 +415,18 @@ def setup_handlers(
 
         async with lock:
             await _process_prompt(message, session, prompt)
+            # Process queued messages — each in a fresh asyncio.Task
+            # to avoid SDK cancel scope conflicts
             while _message_queues.get(session.id):
                 queued_msg, queued_prompt = _message_queues[session.id].popleft()
                 _cancel_flags[session.id] = False
-                # Re-resolve in case session was updated
                 session = await _resolve_session(queued_msg)
-                await _process_prompt(queued_msg, session, queued_prompt)
+                try:
+                    await asyncio.ensure_future(
+                        _process_prompt(queued_msg, session, queued_prompt)
+                    )
+                except Exception:
+                    logger.exception("Error processing queued message")
 
     # --- Bot commands ---
 
