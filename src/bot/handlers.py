@@ -353,7 +353,11 @@ def setup_handlers(
 
         permission_cb = _ask_permission if mode == "safe" else None
 
-        # No intermediate flush — single status message throughout
+        # Track text segments: text between tool batches
+        # Last segment = final response, earlier segments = intermediate commentary
+        text_segments: list[str] = []  # each segment is text between tool groups
+        current_segment = ""
+        had_tools_before = False  # True after at least one tool call
 
         try:
             # Build effective model with 1M suffix
@@ -383,15 +387,21 @@ def setup_handlers(
 
                 elif event.type == "text":
                     accumulated_text += event.data
+                    current_segment += event.data
                     # Show live preview in status
                     tracker.phase = "Writing..."
-                    preview = accumulated_text[-150:].replace("\n", " ").strip()
+                    preview = current_segment[-150:].replace("\n", " ").strip()
                     tracker.last_text = f"✏️ {preview}"
 
                 elif event.type == "tool_use":
+                    # New tool after text = save current segment as intermediate
+                    if current_segment.strip():
+                        text_segments.append(current_segment)
+                        current_segment = ""
+                    had_tools_before = True
                     tracker.phase = "Working..."
                     tracker.current_tool = event.data
-                    tracker.last_text = ""  # clear thinking preview when tools start
+                    tracker.last_text = ""
                     await tracker.refresh()
 
                 elif event.type == "tool_result":
@@ -480,6 +490,10 @@ def setup_handlers(
             if not ticker_task.done():
                 ticker_task.cancel()
 
+        # Save last segment
+        if current_segment.strip():
+            text_segments.append(current_segment)
+
         # Finalize status into summary
         elapsed = tracker.elapsed()
         summary_parts = [f"✅ Done ({elapsed}s)"]
@@ -488,8 +502,12 @@ def setup_handlers(
             summary_parts.append(f'<blockquote expandable>{chr(10).join(log_lines)}</blockquote>')
         await tracker.finalize("\n".join(summary_parts))
 
-        # Send final answer (all accumulated text)
-        final_text = accumulated_text.strip()
+        # Send final answer: last text segment only (earlier = intermediate commentary)
+        # If no tools were used, send everything (it's all the response)
+        if had_tools_before and text_segments:
+            final_text = text_segments[-1].strip()
+        else:
+            final_text = accumulated_text.strip()
         if not final_text:
             return
         chunks = format_telegram_message(final_text)
