@@ -44,6 +44,8 @@ _user_modes: dict[int, str] = {}
 _pending_renames: dict[int, tuple[str, int, int]] = {}
 # Cache: claude_session_id → preview text (for naming topics from /local)
 _local_preview_cache: dict[str, str] = {}
+# Media group buffer: media_group_id → (list of filepaths, caption, message, timer_task)
+_media_groups: dict[str, dict] = {}
 
 PLAN_MODE_PREFIX = (
     "[PLAN MODE] You are in plan mode. Do NOT edit, write, or create any files. "
@@ -1038,6 +1040,23 @@ def setup_handlers(
 
     # --- Content handlers (photo, document, text) ---
 
+    async def _flush_media_group(group_id: str) -> None:
+        """Send all buffered photos in a media group as one prompt."""
+        group = _media_groups.pop(group_id, None)
+        if not group:
+            return
+        paths = group["paths"]
+        caption = group["caption"] or "Please analyze these images."
+        message = group["message"]
+
+        if len(paths) == 1:
+            prompt = f"I'm sharing an image. View it at: {paths[0]}\n\n{caption}"
+        else:
+            file_list = "\n".join(f"- {p}" for p in paths)
+            prompt = f"I'm sharing {len(paths)} images. View them at:\n{file_list}\n\n{caption}"
+
+        await _process_with_queue(message, prompt)
+
     @r.message(F.photo)
     async def handle_photo(message: Message) -> None:
         assert message.from_user and message.bot
@@ -1049,9 +1068,33 @@ def setup_handlers(
             await message.answer(f"Failed to download image: {e}")
             return
 
-        caption = message.caption or "Please analyze this image."
-        prompt = f"I'm sharing an image. View it at: {filepath}\n\n{caption}"
-        await _process_with_queue(message, prompt)
+        group_id = message.media_group_id
+        if group_id:
+            # Part of a media group — buffer and wait for more
+            if group_id not in _media_groups:
+                _media_groups[group_id] = {
+                    "paths": [],
+                    "caption": message.caption,
+                    "message": message,
+                    "timer": None,
+                }
+            _media_groups[group_id]["paths"].append(str(filepath))
+            if message.caption:
+                _media_groups[group_id]["caption"] = message.caption
+
+            # Cancel previous timer, set new one (debounce 1s)
+            prev_timer = _media_groups[group_id].get("timer")
+            if prev_timer:
+                prev_timer.cancel()
+            _media_groups[group_id]["timer"] = asyncio.get_event_loop().call_later(
+                1.0,
+                lambda gid=group_id: asyncio.create_task(_flush_media_group(gid)),
+            )
+        else:
+            # Single photo
+            caption = message.caption or "Please analyze this image."
+            prompt = f"I'm sharing an image. View it at: {filepath}\n\n{caption}"
+            await _process_with_queue(message, prompt)
 
     @r.message(F.document)
     async def handle_document(message: Message) -> None:
