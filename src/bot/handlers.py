@@ -261,35 +261,35 @@ def setup_handlers(
         had_tools = False  # True if current group has any tools
 
         async def _flush_group() -> None:
-            """Send current group as an expandable message."""
+            """Send current group: thought as text, tools as expandable."""
             nonlocal group_text, group_tools, had_tools
             if not group_text and not group_tools:
                 return
-            lines: list[str] = []
+            parts: list[str] = []
             if group_text:
-                escaped = group_text.replace("<", "&lt;").replace(">", "&gt;")
-                lines.append(escaped)
+                escaped = group_text.strip().replace("<", "&lt;").replace(">", "&gt;")
+                parts.append(f"💬 {escaped}")
             if group_tools:
-                lines.append("")
-                for desc, t in group_tools:
-                    lines.append(f"✓ {desc} ({t}s)")
-            html = "\n".join(lines)
+                tool_lines = "\n".join(f"✓ {desc} ({t}s)" for desc, t in group_tools)
+                parts.append(f"<blockquote expandable>{tool_lines}</blockquote>")
+            html = "\n".join(parts)
             try:
-                await message.answer(
-                    f'<blockquote expandable>{html}</blockquote>',
-                    parse_mode="HTML",
-                )
+                await message.answer(html, parse_mode="HTML")
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after)
                 try:
-                    await message.answer(
-                        f'<blockquote expandable>{html}</blockquote>',
-                        parse_mode="HTML",
-                    )
+                    await message.answer(html, parse_mode="HTML")
                 except Exception:
                     pass
             except Exception:
-                pass
+                # Fallback without HTML
+                plain = group_text.strip()
+                if group_tools:
+                    plain += "\n" + "\n".join(f"✓ {d} ({t}s)" for d, t in group_tools)
+                try:
+                    await message.answer(plain)
+                except Exception:
+                    pass
             group_text = ""
             group_tools = []
             had_tools = False
@@ -380,42 +380,21 @@ def setup_handlers(
             return
 
         # Flush last intermediate group (if it had tools)
-        # The remaining group_text without tools = final answer
         if group_tools:
-            # Last group had tools — flush it, final answer is empty
             await _flush_group()
 
-        # Convert status_msg to summary
-        total_elapsed = tracker.elapsed()
-        summary_lines: list[str] = []
-        if accumulated_thinking:
-            thinking_text = accumulated_thinking.replace("\n", " ").strip()
-            summary_lines.append(f"💭 {thinking_text}")
-            summary_lines.append("")
-        for step_name, step_time in tracker.steps:
-            summary_lines.append(f"✓ {step_name} ({step_time}s)")
-        summary_lines.append(f"\n⏱ {total_elapsed}s")
-
-        summary_html = "\n".join(summary_lines)
+        # Remove the status message (groups are already sent as separate messages)
         try:
-            await status_msg.edit_text(
-                f'<blockquote expandable>{summary_html}</blockquote>',
-                parse_mode="HTML", reply_markup=None,
-            )
-        except TelegramRetryAfter as e:
-            await asyncio.sleep(e.retry_after)
+            await status_msg.delete()
+        except Exception:
+            # If delete fails, minimize it
             try:
-                await status_msg.edit_text(
-                    f'<blockquote expandable>{summary_html}</blockquote>',
-                    parse_mode="HTML", reply_markup=None,
-                )
+                total = tracker.elapsed()
+                await status_msg.edit_text(f"⏱ {total}s", reply_markup=None)
             except Exception:
                 pass
-        except Exception:
-            pass
 
-        # Send final answer (clean, no intermediate steps)
-        # If last group had no tools, group_text IS the final answer
+        # Send final answer (clean)
         final_text = group_text if not had_tools else accumulated_text
         if final_text:
             chunks = format_telegram_message(final_text.strip())
