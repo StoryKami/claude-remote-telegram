@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aiogram import Bot, Router, F
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message,
@@ -145,13 +146,15 @@ def setup_handlers(
             self._last_rendered = html
             try:
                 await self.msg.edit_text(html, parse_mode="HTML", reply_markup=self._stop_kb)
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after)
             except Exception:
                 pass
 
     async def _run_status_ticker(tracker: _StatusTracker) -> None:
-        """Refresh status message every 1 second."""
+        """Refresh status message every 3 seconds to avoid Telegram rate limits."""
         while True:
-            await asyncio.sleep(1)
+            await asyncio.sleep(3)
             await tracker.refresh()
 
     async def _process_prompt(
