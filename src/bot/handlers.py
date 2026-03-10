@@ -40,6 +40,8 @@ _cancel_flags: dict[str, bool] = {}
 _message_queues: dict[str, deque[tuple[Message, str]]] = {}
 # Per-user state
 _user_modes: dict[int, str] = {}
+# Pending rename: user_id → (session_id, topic_id, chat_id)
+_pending_renames: dict[int, tuple[str, int, int]] = {}
 # Cache: claude_session_id → preview text (for naming topics from /local)
 _local_preview_cache: dict[str, str] = {}
 
@@ -257,7 +259,7 @@ def setup_handlers(
 
         except asyncio.CancelledError:
             await status_msg.edit_text("Cancelled.")
-            return
+            return  # queue processing continues in _process_with_queue
         except Exception as e:
             logger.exception("Error processing message")
             await status_msg.edit_text("Error: something went wrong. Check logs for details.")
@@ -884,7 +886,10 @@ def setup_handlers(
                 await session_manager.set_claude_session_id(session.id, new_claude_id)
                 await _send_topic_welcome(
                     callback.message.bot, chat.id, topic.message_thread_id,
-                    session.id, f"Cloned: {name}\nSame history, independent from now.",
+                    session.id,
+                    f"Cloned: {name}\n"
+                    "This is a forked session. Previous history is available for context, "
+                    "but this is a fresh start — no need to continue previous tasks unless asked.",
                 )
                 await callback.answer("Cloned!")
                 try:
@@ -933,21 +938,50 @@ def setup_handlers(
 
     # --- Interrupt button ---
 
+    async def _verify_session_owner(callback: CallbackQuery, session_id: str) -> bool:
+        if not _is_valid_session_id(session_id):
+            await callback.answer("Invalid session.", show_alert=True)
+            return False
+        session = await session_manager._repo.get_session(session_id)
+        if not session or session.user_id != callback.from_user.id:
+            await callback.answer("Not your session.", show_alert=True)
+            return False
+        return True
+
+    @r.callback_query(F.data.startswith("stopall:"))
+    async def cb_stop_all(callback: CallbackQuery) -> None:
+        assert callback.from_user and callback.data
+        session_id = callback.data.split(":", 1)[1]
+        if not await _verify_session_owner(callback, session_id):
+            return
+        _cancel_flags[session_id] = True
+        _message_queues.pop(session_id, None)
+        queue_msg = ""
+        await callback.answer(f"Stopped all.{queue_msg}")
+
     @r.callback_query(F.data.startswith("stop:"))
     async def cb_stop(callback: CallbackQuery) -> None:
         assert callback.from_user and callback.data
         session_id = callback.data.split(":", 1)[1]
-        if not _is_valid_session_id(session_id):
-            await callback.answer("Invalid session.", show_alert=True)
-            return
-        # Verify ownership
-        session = await session_manager._repo.get_session(session_id)
-        if not session or session.user_id != callback.from_user.id:
-            await callback.answer("Not your session.", show_alert=True)
+        if not await _verify_session_owner(callback, session_id):
             return
         _cancel_flags[session_id] = True
-        _message_queues.pop(session_id, None)
-        await callback.answer("Stopping...")
+        # Keep queue — next message will process after cancel
+        queued = len(_message_queues.get(session_id, []))
+        queue_msg = f" ({queued} queued will continue)" if queued else ""
+        await callback.answer(f"Stopping current...{queue_msg}")
+
+    @r.callback_query(F.data.startswith("rename_topic:"))
+    async def cb_rename_topic(callback: CallbackQuery) -> None:
+        assert callback.from_user and callback.data
+        parts = callback.data.split(":")
+        session_id = parts[1]
+        topic_id = int(parts[2])
+        chat_id = callback.message.chat.id if callback.message else 0
+        _pending_renames[callback.from_user.id] = (session_id, topic_id, chat_id)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer("Send the new name for this topic:")
 
     # --- Topic lifecycle ---
 
