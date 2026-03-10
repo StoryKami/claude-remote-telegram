@@ -915,14 +915,26 @@ def setup_handlers(
         """Save chat info so restart notification goes to the right place."""
         restart_file = Path(__file__).resolve().parent.parent.parent / "data" / ".restart_chat"
         restart_file.parent.mkdir(parents=True, exist_ok=True)
-        restart_file.write_text(json.dumps({
+        data = {
             "chat_id": message.chat.id,
             "thread_id": message.message_thread_id,
-        }))
+        }
+        restart_file.write_text(json.dumps(data))
+        logger.info("_save_restart_chat — saved: %s", data)
 
     @r.message(Command("restart"))
     async def cmd_restart(message: Message) -> None:
         assert message.from_user
+        logger.info(
+            "/restart — chat_id=%s, thread_id=%s, is_topic_message=%s, chat.is_forum=%s, chat.type=%s",
+            message.chat.id, message.message_thread_id, message.is_topic_message,
+            message.chat.is_forum, message.chat.type,
+        )
+        # Dump raw message fields for debugging
+        raw = message.model_dump(exclude_none=True)
+        logger.info("/restart raw keys: %s", list(raw.keys()))
+        if "reply_to_message" in raw:
+            logger.info("/restart reply_to_message: %s", {k: v for k, v in raw["reply_to_message"].items() if k in ("message_id", "message_thread_id", "forum_topic_created", "is_topic_message")})
         await message.answer("Restarting bot...")
         _save_restart_chat(message)
         logger.info("Restart requested by user %d", message.from_user.id)
@@ -932,6 +944,13 @@ def setup_handlers(
     @r.message(Command("pull"))
     async def cmd_pull(message: Message) -> None:
         assert message.from_user
+        logger.info(
+            "/pull — chat_id=%s, thread_id=%s, is_topic_message=%s, chat.is_forum=%s, chat.type=%s",
+            message.chat.id, message.message_thread_id, message.is_topic_message,
+            message.chat.is_forum, message.chat.type,
+        )
+        raw = message.model_dump(exclude_none=True)
+        logger.info("/pull raw keys: %s", list(raw.keys()))
         project_dir = Path(__file__).resolve().parent.parent.parent
         try:
             proc = await asyncio.create_subprocess_exec(

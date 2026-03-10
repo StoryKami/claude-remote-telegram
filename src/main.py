@@ -3,12 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
-import ssl
 import sys
 
-import aiohttp
 from aiogram import Bot, Dispatcher
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import BotCommand
 
 from src.bot.handlers import router, setup_handlers
@@ -46,13 +43,7 @@ async def main() -> None:
     repository = SessionRepository(settings.get_db_path())
     await repository.initialize()
 
-    # Skip SSL verification if behind corporate VPN with MITM proxy
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-    tg_session = AiohttpSession()
-    tg_session._connector_init["ssl"] = ssl_context
-    bot = Bot(token=settings.telegram_bot_token, session=tg_session)
+    bot = Bot(token=settings.telegram_bot_token)
 
     try:
         session_manager = SessionManager(
@@ -61,6 +52,25 @@ async def main() -> None:
         )
 
         dp = Dispatcher()
+
+        # Raw update logging to diagnose missing message_thread_id
+        @dp.update.outer_middleware()
+        async def _log_raw_update(handler, update, data):
+            if update.message and update.message.chat.is_forum:
+                raw = update.model_dump(exclude_none=True)
+                msg_raw = raw.get("message", {})
+                logger.info(
+                    "RAW UPDATE — thread_id=%s, is_topic=%s, keys=%s",
+                    msg_raw.get("message_thread_id"),
+                    msg_raw.get("is_topic_message"),
+                    [k for k in msg_raw if k in (
+                        "message_thread_id", "is_topic_message",
+                        "reply_to_message", "forum_topic_created",
+                        "forum_topic_edited", "general_forum_topic_hidden",
+                    )],
+                )
+            return await handler(update, data)
+
         dp.message.middleware(AuthMiddleware(auth_service))
         dp.callback_query.middleware(AuthMiddleware(auth_service))
 
