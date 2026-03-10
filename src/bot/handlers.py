@@ -46,6 +46,8 @@ _user_effort: dict[int, str] = {}  # user_id → effort level (low/medium/high)
 _context_notify: dict[int, bool] = {}  # user_id → context % notification on/off
 # Per-session context tracking
 _session_input_tokens: dict[str, int] = {}  # session_id → last known input tokens
+_session_output_tokens: dict[str, int] = {}  # session_id → cumulative output tokens
+_session_cost: dict[str, float] = {}  # session_id → cumulative cost USD
 _session_last_pct_notified: dict[str, int] = {}  # session_id → last notified 10% bracket
 
 # Model context window sizes
@@ -407,7 +409,16 @@ def setup_handlers(
                     try:
                         usage_data = json.loads(event.data)
                         input_tokens = usage_data.get("input_tokens", 0)
+                        output_tokens = usage_data.get("output_tokens", 0)
+                        cost_usd = usage_data.get("cost_usd") or 0
                         _session_input_tokens[session.id] = input_tokens
+                        _session_output_tokens[session.id] = (
+                            _session_output_tokens.get(session.id, 0) + output_tokens
+                        )
+                        if cost_usd:
+                            _session_cost[session.id] = (
+                                _session_cost.get(session.id, 0) + cost_usd
+                            )
 
                         # Determine context window for current model (with 1M suffix)
                         ctx_model = _user_models.get(user_id, "") or bridge._model or ""
@@ -738,6 +749,56 @@ def setup_handlers(
         result = await bridge.compact_session(session.claude_session_id)
         _session_last_pct_notified.pop(session.id, None)
         await message.answer(f"Done: {result[:500]}")
+
+    @r.message(Command("status"))
+    async def cmd_status(message: Message) -> None:
+        """Show full session status — model, context, cost, effort, mode."""
+        assert message.from_user
+        user_id = message.from_user.id
+        session = await _resolve_session(message)
+
+        # Model info
+        model_id = _user_models.get(user_id, "") or bridge._model or ""
+        ext_1m = _user_1m.get(user_id, False)
+        if model_id and ext_1m and "[1m]" not in model_id:
+            display_model = f"{model_id}[1m]"
+        else:
+            display_model = model_id or "default"
+
+        # Effort
+        effort = _user_effort.get(user_id, "high")
+
+        # Mode
+        mode = _user_modes.get(user_id, "code")
+
+        # Context
+        input_tokens = _session_input_tokens.get(session.id, 0)
+        ctx_window = MODEL_CONTEXT_WINDOWS.get(display_model, DEFAULT_CONTEXT_WINDOW)
+        pct = int(input_tokens / ctx_window * 100) if ctx_window else 0
+        bar_filled = pct // 5  # 20 chars total
+        bar = "█" * bar_filled + "░" * (20 - bar_filled)
+
+        # Cost & output
+        output_tokens = _session_output_tokens.get(session.id, 0)
+        cost = _session_cost.get(session.id, 0)
+
+        # Session info
+        sid = session.claude_session_id or "—"
+        if len(sid) > 12:
+            sid = sid[:12] + "…"
+
+        lines = [
+            f"<b>Session:</b> {session.name} ({sid})",
+            f"<b>Model:</b> {display_model}",
+            f"<b>Mode:</b> {mode} | <b>Effort:</b> {effort}",
+            "",
+            f"<b>Context:</b> {pct}%",
+            f"<code>{bar}</code> {input_tokens:,} / {ctx_window:,}",
+            "",
+            f"<b>Output:</b> {output_tokens:,} tokens",
+            f"<b>Cost:</b> ${cost:.4f}" if cost else "<b>Cost:</b> —",
+        ]
+        await message.answer("\n".join(lines), parse_mode="HTML")
 
     @r.message(Command("context"))
     async def cmd_context(message: Message) -> None:
@@ -1415,7 +1476,7 @@ def setup_handlers(
     _bot_commands = {
         "start", "help", "new", "sessions", "switch",
         "current", "rename", "delete", "cancel", "revert", "close", "reopen",
-        "mode", "model", "compact", "context", "restart", "pull", "local",
+        "mode", "model", "status", "compact", "context", "restart", "pull", "local",
     }
 
     def _is_bot_command(text: str) -> bool:

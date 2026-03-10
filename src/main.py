@@ -78,6 +78,7 @@ async def main() -> None:
             BotCommand(command="model", description="Switch Claude model (opus|sonnet|haiku)"),
             BotCommand(command="cancel", description="Cancel current request"),
             BotCommand(command="revert", description="Revert uncommitted changes"),
+            BotCommand(command="status", description="Session status (model, context, cost)"),
             BotCommand(command="local", description="List local Claude sessions"),
             BotCommand(command="pull", description="Git pull + restart"),
             BotCommand(command="restart", description="Restart bot"),
