@@ -1,7 +1,27 @@
 # Feature Backlog — claude-remote-telegram
 
-> 40+ 프로젝트 분석 기반. 우선순위: P0(즉시) > P1(다음) > P2(나중) > P3(아이디어)
+> 60+ 프로젝트 분석 기반. 우선순위: P0(즉시) > P1(다음) > P2(나중) > P3(아이디어)
 > 참고 리서치: 이 파일 하단 [Sources] 섹션
+
+## 중요도 순위 (Top 15)
+
+| # | 기능 | 우선순위 | 이유 |
+|---|------|---------|------|
+| 1 | 음성 메시지 (Whisper) | P0 | 거의 모든 경쟁자가 지원. 모바일 핵심 UX |
+| 2 | /model 명령어 | P0 | 기본 기능인데 없음. 즉시 추가 가능 |
+| 3 | /usage + 비용 표시 | P0 | SDK ResultMessage에서 이미 cost_usd 받고 있음 |
+| 4 | SDK + CLI fallback | P0 | SDK 불안정 시 서비스 연속성 보장 |
+| 5 | Dual Mode (대화형/터미널) | P0 | RichardAtCT 핵심 차별점. 파워유저에게 필수 |
+| 6 | 토큰/비용 모니터링 (DB) | P1 | 비용 관리. 장기 운영에 필수 |
+| 7 | 프로젝트별 세션 격리 | P1 | 여러 프로젝트 동시 작업 시 필수 |
+| 8 | GitHub 웹훅 연동 | P1 | 개발 워크플로우 통합. 높은 가치 |
+| 9 | 알림 시스템 (Async) | P1 | 긴 작업 시 사용자 자유 보장 |
+| 10 | 스케줄러 (cron) | P2 | 자동화. 있으면 좋지만 급하진 않음 |
+| 11 | 웹 대시보드 | P2 | 시각적 모니터링. Telegram 보완 |
+| 12 | 멀티 유저 + 관리자 | P2 | 팀 사용 시 필요 |
+| 13 | MCP 서버 통합 | P2 | 확장성. 다른 도구와 연결 |
+| 14 | 멀티 머신 지원 | P3 | 여러 PC 제어. 고급 사용자용 |
+| 15 | 음성 TTS 응답 | P3 | hands-free. 음성 입력이 먼저 |
 
 ## 현재 구현 완료
 
@@ -37,9 +57,16 @@
 - [ ] ResultMessage에서 cost_usd 추적 + 누적
 - 참고: opcode, Claude-Code-Usage-Monitor
 
-### 에러 복구 개선
-- [ ] SDK query 실패 시 자동 retry (1회)
-- [ ] "Session not found" 등 일반적 에러 → 사용자 친화적 메시지
+### SDK + CLI fallback
+- [ ] SDK query 실패 시 CLI subprocess로 자동 전환
+- [ ] SDK 에러 시 자동 retry (1회)
+- 참고: RichardAtCT (SDK primary, CLI fallback)
+
+### Dual Mode (대화형 + 터미널)
+- [ ] 대화형(agentic) 모드 — 자연어로 대화 (현재 기본)
+- [ ] 터미널 모드 — 13개 명령어 + 인라인 키보드로 직접 조작
+- [ ] /terminal, /chat으로 전환
+- 참고: RichardAtCT (dual mode)
 
 ---
 
@@ -104,7 +131,7 @@
 - [ ] /schedule "매일 오전 9시" "git pull && npm test"
 - [ ] 예약 작업 결과 알림
 - [ ] 반복 작업 관리
-- 참고: OpenClaw
+- 참고: OpenClaw, RichardAtCT (/schedule)
 
 ---
 
