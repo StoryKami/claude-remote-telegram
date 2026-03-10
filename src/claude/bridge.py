@@ -111,6 +111,7 @@ class ClaudeBridge:
                     for block in message.content:
                         if isinstance(block, TextBlock):
                             accumulated_text += block.text
+                            logger.debug("TextBlock: %s", block.text[:100])
                             yield StreamEvent("text", block.text)
                         elif isinstance(block, ThinkingBlock):
                             if block.thinking:
