@@ -402,14 +402,14 @@ def setup_handlers(
                     tracker.phase = "Working..."
                     tracker.current_tool = event.data
                     tracker.last_text = ""
-                    await tracker.refresh()
+                    # Let ticker handle refresh (every 3s)
 
                 elif event.type == "tool_result":
                     step = (tracker.current_tool or "?", tracker.elapsed())
                     tracker.steps.append(step)
                     all_steps.append(step)
                     tracker.current_tool = ""
-                    await tracker.refresh()
+                    # Let ticker handle refresh (every 3s)
 
                 elif event.type == "error":
                     ticker_task.cancel()
