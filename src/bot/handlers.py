@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -48,6 +49,12 @@ PLAN_MODE_PREFIX = (
 )
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+_SESSION_ID_RE = re.compile(r"^[a-f0-9\-]{8,36}$")
+
+
+def _is_valid_session_id(sid: str) -> bool:
+    return bool(_SESSION_ID_RE.match(sid))
 
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
@@ -217,7 +224,8 @@ def setup_handlers(
 
                 elif event.type == "error":
                     ticker_task.cancel()
-                    await status_msg.edit_text(f"Error: {event.data[:4000]}")
+                    logger.error("CLI error: %s", event.data[:500])
+                    await status_msg.edit_text("Error: Claude CLI encountered an error. Check logs for details.")
                     return
 
                 elif event.type == "done":
@@ -234,7 +242,7 @@ def setup_handlers(
             return
         except Exception as e:
             logger.exception("Error processing message")
-            await status_msg.edit_text(f"Error: {e}")
+            await status_msg.edit_text("Error: something went wrong. Check logs for details.")
             return
         finally:
             ticker_task.cancel()
@@ -660,6 +668,9 @@ def setup_handlers(
     async def cb_peek(callback: CallbackQuery) -> None:
         assert callback.from_user and callback.data
         session_id = callback.data.split(":", 1)[1]
+        if not _is_valid_session_id(session_id):
+            await callback.answer("Invalid session ID.", show_alert=True)
+            return
         preview = await asyncio.to_thread(_peek_session, session_id)
         if callback.message:
             try:
@@ -672,6 +683,9 @@ def setup_handlers(
     async def cb_local(callback: CallbackQuery) -> None:
         assert callback.from_user and callback.data and callback.message
         claude_session_id = callback.data.split(":", 1)[1]
+        if not _is_valid_session_id(claude_session_id):
+            await callback.answer("Invalid session ID.", show_alert=True)
+            return
         user_id = callback.from_user.id
         chat = callback.message.chat
 
@@ -737,6 +751,14 @@ def setup_handlers(
     async def cb_stop(callback: CallbackQuery) -> None:
         assert callback.from_user and callback.data
         session_id = callback.data.split(":", 1)[1]
+        if not _is_valid_session_id(session_id):
+            await callback.answer("Invalid session.", show_alert=True)
+            return
+        # Verify ownership
+        session = await session_manager._repo.get_session(session_id)
+        if not session or session.user_id != callback.from_user.id:
+            await callback.answer("Not your session.", show_alert=True)
+            return
         _cancel_flags[session_id] = True
         _message_queues.pop(session_id, None)
         await callback.answer("Stopping...")

@@ -115,8 +115,16 @@ class SessionRepository:
         rows = await cursor.fetchall()
         return [_row_to_session(row) for row in rows]
 
+    _ALLOWED_UPDATE_FIELDS = frozenset({
+        "name", "claude_session_id", "is_active", "topic_id", "updated_at",
+    })
+
     async def update_session(self, session_id: str, **fields: object) -> None:
         assert self._db
+        # Whitelist column names to prevent SQL injection
+        bad_fields = set(fields) - self._ALLOWED_UPDATE_FIELDS
+        if bad_fields:
+            raise ValueError(f"Invalid fields: {bad_fields}")
         fields["updated_at"] = datetime.now(timezone.utc).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in fields)
         values = list(fields.values())
