@@ -98,4 +98,21 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    MAX_RETRIES = 10
+    RETRY_DELAY = 5  # seconds
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            asyncio.run(main())
+            break  # clean exit
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"[CRASH] Attempt {attempt}/{MAX_RETRIES}: {e}", flush=True)
+            if attempt < MAX_RETRIES:
+                print(f"[RESTART] Restarting in {RETRY_DELAY}s...", flush=True)
+                import time
+                time.sleep(RETRY_DELAY)
+            else:
+                print("[FATAL] Max retries reached. Exiting.", flush=True)
+                sys.exit(1)
