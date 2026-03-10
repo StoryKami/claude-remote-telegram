@@ -111,7 +111,6 @@ if __name__ == "__main__":
         _h._cancel_flags.clear()
         _h._message_queues.clear()
         _h._user_modes.clear()
-        _h._active_processes.clear()
 
         # Prevent duplicate logging handlers on restart
         logging.root.handlers.clear()

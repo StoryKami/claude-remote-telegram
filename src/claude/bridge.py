@@ -1,273 +1,140 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import sys
 from dataclasses import dataclass
-from typing import AsyncIterator
+from pathlib import PurePosixPath, PureWindowsPath
+from typing import AsyncIterator, Callable, Awaitable
+
+from claude_code_sdk import (
+    ClaudeCodeOptions,
+    AssistantMessage,
+    ResultMessage,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    query,
+)
 
 from src.config import Settings
 
 logger = logging.getLogger(__name__)
 
+# Type for permission callback: (tool_name, params) -> bool
+PermissionCallback = Callable[[str, dict], Awaitable[bool]]
+
 
 @dataclass(frozen=True)
 class StreamEvent:
-    type: str  # "text", "tool_use", "tool_result", "error", "done"
+    type: str  # "text", "thinking", "tool_use", "tool_result", "error", "done"
     data: str
     session_id: str | None = None
 
 
 class ClaudeBridge:
     def __init__(self, settings: Settings) -> None:
-        self._cli = settings.claude_cli_path
-        self._model = settings.claude_model
-        self._permission_mode = settings.claude_permission_mode
-        self._max_budget = settings.claude_max_budget_usd
+        self._model = settings.claude_model or None
+        self._default_permission_mode = settings.claude_permission_mode
         self._workspace = settings.get_workspace_path()
-        self._timeout = settings.cli_timeout
-        # Exposed for external kill (e.g., stop button)
-        self.active_processes: dict[str, asyncio.subprocess.Process] = {}  # key -> process
+        # For kill support: session_id -> cancel event
+        self._cancel_events: dict[str, asyncio.Event] = {}
 
-    def kill_process(self, key: str) -> bool:
-        """Kill an active subprocess by key. Returns True if killed."""
-        proc = self.active_processes.get(key)
-        if not proc or proc.returncode is not None:
-            return False
-        try:
-            if sys.platform == "win32":
-                import subprocess as _sp
-                _sp.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                        capture_output=True, timeout=5)
-            else:
-                proc.kill()
-            logger.info("Killed process for key=%s pid=%s", key, proc.pid)
-            return True
-        except Exception:
-            return False
-
-    def _build_command(
-        self,
-        prompt: str,
-        claude_session_id: str | None = None,
-    ) -> list[str]:
-        cmd = [
-            self._cli,
-            "-p",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--permission-mode", self._permission_mode,
-        ]
-        if self._model:
-            cmd.extend(["--model", self._model])
-        if self._max_budget > 0:
-            cmd.extend(["--max-budget-usd", str(self._max_budget)])
-        if claude_session_id:
-            cmd.extend(["--resume", claude_session_id])
-        cmd.append(prompt)
-        return cmd
+    def request_cancel(self, key: str) -> None:
+        """Signal cancellation for a running session."""
+        evt = self._cancel_events.get(key)
+        if evt:
+            evt.set()
+            logger.info("Cancel requested for key=%s", key)
 
     async def send_message(
         self,
         prompt: str,
         claude_session_id: str | None = None,
         process_key: str | None = None,
+        permission_mode: str | None = None,
+        permission_callback: PermissionCallback | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        cmd = self._build_command(prompt, claude_session_id)
-        logger.info("CLI command: %s", " ".join(cmd[:6]) + "...")
+        mode = permission_mode or self._default_permission_mode
 
-        # Remove CLAUDECODE env var to allow running inside a Claude Code session
+        # Build SDK options
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(self._workspace),
-                env=env,
-                limit=1024 * 1024,  # 1MB — handles large JSON lines from image reads
-            )
-        except FileNotFoundError:
-            yield StreamEvent("error", f"Claude CLI not found: {self._cli}")
-            return
+        async def can_use_tool(tool_name: str, params: dict, context: object) -> PermissionResultAllow | PermissionResultDeny:
+            if permission_callback:
+                approved = await permission_callback(tool_name, params)
+                if approved:
+                    return PermissionResultAllow(behavior="allow", updated_input=None, updated_permissions=None)
+                return PermissionResultDeny(behavior="deny", message="User denied via Telegram", interrupt=False)
+            # No callback = auto-allow (bypassPermissions behavior)
+            return PermissionResultAllow(behavior="allow", updated_input=None, updated_permissions=None)
 
-        assert process.stdout
+        options = ClaudeCodeOptions(
+            permission_mode=mode if mode in ("default", "acceptEdits", "plan", "bypassPermissions") else "bypassPermissions",
+            cwd=str(self._workspace),
+            env=env,
+            can_use_tool=can_use_tool if permission_callback or mode == "default" else None,
+        )
+        if self._model:
+            options.model = self._model
+        if claude_session_id:
+            options.resume = claude_session_id
 
+        # Set up cancel event
+        cancel_event = asyncio.Event()
         if process_key:
-            self.active_processes[process_key] = process
+            self._cancel_events[process_key] = cancel_event
 
         result_session_id: str | None = None
         accumulated_text = ""
 
+        logger.info("SDK query: mode=%s resume=%s", mode, claude_session_id)
+
         try:
-            async for raw_line in _read_lines_with_timeout(process.stdout, self._timeout):
-                line = raw_line.strip()
-                if not line:
-                    continue
+            async for message in query(prompt=prompt, options=options):
+                # Check cancel
+                if cancel_event.is_set():
+                    logger.info("Query cancelled for key=%s", process_key)
+                    break
 
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.debug("Non-JSON line: %s", line[:200])
-                    continue
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            accumulated_text += block.text
+                            yield StreamEvent("text", block.text)
+                        elif isinstance(block, ThinkingBlock):
+                            if block.thinking:
+                                yield StreamEvent("thinking", block.thinking)
+                        elif isinstance(block, ToolUseBlock):
+                            desc = _describe_tool(block.name, block.input if isinstance(block.input, dict) else {})
+                            yield StreamEvent("tool_use", desc)
+                        elif isinstance(block, ToolResultBlock):
+                            content = block.content if isinstance(block.content, str) else str(block.content)[:200]
+                            yield StreamEvent("tool_result", content)
 
-                parsed = _parse_event(event)
-                if parsed:
-                    if parsed.session_id:
-                        result_session_id = parsed.session_id
-                    if parsed.type == "text":
-                        accumulated_text += parsed.data
-                    yield parsed
+                elif isinstance(message, ResultMessage):
+                    result_session_id = message.session_id
+                    cost = getattr(message, "cost_usd", None) or getattr(message, "total_cost_usd", None)
+                    if cost:
+                        accumulated_text += f"\n\n[Cost: ${cost:.4f}]"
 
-        except asyncio.TimeoutError:
-            yield StreamEvent("error", f"CLI timed out after {self._timeout}s")
-            return
-        except GeneratorExit:
-            # Generator abandoned (e.g. /cancel) — clean up subprocess
-            return
         except Exception as e:
-            logger.exception("Bridge error")
+            logger.exception("SDK query error")
             yield StreamEvent("error", str(e))
             return
-        else:
-            # Happy path — wait for process and check exit code
-            await process.wait()
-            if process.returncode != 0 and not accumulated_text:
-                stderr = ""
-                if process.stderr:
-                    stderr_bytes = await process.stderr.read()
-                    stderr = stderr_bytes.decode("utf-8", errors="replace")
-                yield StreamEvent("error", f"CLI exited with code {process.returncode}: {stderr[:500]}")
-            yield StreamEvent("done", accumulated_text, session_id=result_session_id)
         finally:
             if process_key:
-                self.active_processes.pop(process_key, None)
-            # Always ensure subprocess and its children are cleaned up
-            if process.returncode is None:
-                try:
-                    if sys.platform == "win32":
-                        # Kill entire process tree on Windows
-                        import subprocess as _sp
-                        _sp.run(
-                            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                            capture_output=True, timeout=5,
-                        )
-                    else:
-                        process.kill()
-                except Exception:
-                    pass
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except Exception:
-                    pass
-            # Drain stderr to release pipe
-            if process.stderr:
-                try:
-                    await process.stderr.read()
-                except Exception:
-                    pass
+                self._cancel_events.pop(process_key, None)
 
-
-def _parse_event(event: dict) -> StreamEvent | None:
-    """Parse a stream-json event from Claude CLI."""
-    event_type = event.get("type", "")
-
-    # assistant message events
-    if event_type == "assistant":
-        subtype = event.get("subtype", "")
-        if subtype == "text":
-            return StreamEvent("text", event.get("text", ""))
-        if subtype == "tool_use":
-            tool = event.get("tool", {})
-            name = tool.get("name", "unknown") if isinstance(tool, dict) else str(tool)
-            tool_input = tool.get("input", {}) if isinstance(tool, dict) else {}
-            desc = _describe_tool(name, tool_input)
-            return StreamEvent("tool_use", desc)
-        if subtype == "thinking":
-            thinking = event.get("thinking", "")
-            if thinking:
-                return StreamEvent("thinking", thinking)
-
-        # subtype is empty — parse message.content blocks directly
-        msg = event.get("message", {})
-        if isinstance(msg, dict):
-            results = []
-            for block in msg.get("content", []):
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type", "")
-                if btype == "text":
-                    text = block.get("text", "")
-                    if text:
-                        results.append(StreamEvent("text", text))
-                elif btype == "tool_use":
-                    name = block.get("name", "unknown")
-                    tool_input = block.get("input", {})
-                    desc = _describe_tool(name, tool_input)
-                    results.append(StreamEvent("tool_use", desc))
-                elif btype == "thinking":
-                    thinking = block.get("thinking", "")
-                    if thinking:
-                        results.append(StreamEvent("thinking", thinking))
-            # Return first meaningful event found
-            if results:
-                return results[0]
-        logger.debug("Unhandled assistant subtype=%s keys=%s", subtype, list(event.keys()))
-
-    # tool result events
-    if event_type == "tool":
-        subtype = event.get("subtype", "")
-        if subtype == "result":
-            content = event.get("content", "")
-            if isinstance(content, list):
-                content = "\n".join(
-                    block.get("text", "") for block in content if isinstance(block, dict)
-                )
-            return StreamEvent("tool_result", str(content)[:200])
-
-    # user event with tool_use_result (tool completed)
-    if event_type == "user" and "tool_use_result" in event:
-        return StreamEvent("tool_result", "")
-
-    # content_block_delta (alternative format)
-    if event_type == "content_block_delta":
-        delta = event.get("delta", {})
-        if delta.get("type") == "text_delta":
-            return StreamEvent("text", delta.get("text", ""))
-        if delta.get("type") == "thinking_delta":
-            return StreamEvent("thinking", delta.get("thinking", ""))
-
-    # result event
-    if event_type == "result":
-        session_id = event.get("session_id", "")
-        result_text = event.get("result", "")
-        cost = event.get("cost_usd")
-        data = result_text
-        if cost:
-            data += f"\n\n[Cost: ${cost:.4f}]"
-        return StreamEvent("done", data, session_id=session_id)
-
-    # message event (wraps content blocks)
-    if event_type == "message":
-        content = event.get("content", [])
-        texts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                texts.append(block.get("text", ""))
-        if texts:
-            return StreamEvent("text", "\n".join(texts))
-
-    if event_type not in ("", "start", "ping"):
-        logger.debug("Unhandled event type=%s keys=%s", event_type, list(event.keys()))
-    return None
+        yield StreamEvent("done", accumulated_text, session_id=result_session_id)
 
 
 def _short_path(path: str) -> str:
     """Shorten a file path to just filename or last 2 segments."""
-    from pathlib import PurePosixPath, PureWindowsPath
     try:
         p = PureWindowsPath(path) if "\\" in path else PurePosixPath(path)
         parts = p.parts
@@ -280,11 +147,9 @@ def _short_path(path: str) -> str:
 
 def _short_bash(cmd: str) -> str:
     """Extract the meaningful part of a bash command."""
-    # Strip wsl/ssh wrappers to show the inner command
     for prefix in ['wsl -d Ubuntu -e bash -c "', "wsl -d Ubuntu -e bash -c '"]:
         if cmd.startswith(prefix):
             cmd = cmd[len(prefix):].rstrip("\"'")
-    # Strip ssh wrapper
     if "ssh " in cmd and "bash -c" in cmd:
         idx = cmd.find("bash -c")
         if idx >= 0:
@@ -318,22 +183,3 @@ def _describe_tool(name: str, params: dict) -> str:
             return f"search: {params.get('query', '?')[:40]}"
         case _:
             return name.lower()
-
-
-async def _read_lines_with_timeout(
-    stream: asyncio.StreamReader,
-    timeout: int,
-) -> AsyncIterator[str]:
-    use_timeout = timeout > 0
-    deadline = asyncio.get_event_loop().time() + timeout if use_timeout else 0
-    while True:
-        if use_timeout:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                raise asyncio.TimeoutError()
-            line = await asyncio.wait_for(stream.readline(), timeout=remaining)
-        else:
-            line = await stream.readline()
-        if not line:
-            break
-        yield line.decode("utf-8", errors="replace")

@@ -38,7 +38,6 @@ router = Router()
 _session_locks: dict[str, asyncio.Lock] = {}
 _cancel_flags: dict[str, bool] = {}
 _message_queues: dict[str, deque[tuple[Message, str]]] = {}
-_active_processes: dict[str, asyncio.subprocess.Process] = {}  # session_id -> subprocess
 # Per-user state
 _user_modes: dict[int, str] = {}
 # Pending rename: user_id → (session_id, topic_id, chat_id)
@@ -514,7 +513,7 @@ def setup_handlers(
         session = await _resolve_session(message)
         _cancel_flags[session.id] = True
         _message_queues.pop(session.id, None)
-        bridge.kill_process(session.id)
+        bridge.request_cancel(session.id)
         await message.answer("Cancelling... (queue cleared)")
 
     @r.message(Command("close"))
@@ -984,7 +983,7 @@ def setup_handlers(
             return
         _cancel_flags[session_id] = True
         _message_queues.pop(session_id, None)
-        bridge.kill_process(session_id)
+        bridge.request_cancel(session_id)
         await callback.answer("Stopped all.")
 
     @r.callback_query(F.data.startswith("stop:"))
@@ -994,7 +993,7 @@ def setup_handlers(
         if not await _verify_session_owner(callback, session_id):
             return
         _cancel_flags[session_id] = True
-        bridge.kill_process(session_id)
+        bridge.request_cancel(session_id)
         queued = len(_message_queues.get(session_id, []))
         queue_msg = f" ({queued} queued will continue)" if queued else ""
         await callback.answer(f"Stopping...{queue_msg}")
