@@ -129,12 +129,10 @@ class ClaudeBridge:
 
         try:
             async for message in query(prompt=prompt, options=options):
-                # Check cancel — don't break, just stop yielding
+                # Check cancel — break immediately to kill the subprocess
                 if cancel_event.is_set():
-                    if not cancelled:
-                        logger.info("Query cancelled for key=%s", process_key)
-                        cancelled = True
-                    continue
+                    logger.info("Query cancelled for key=%s, terminating process", process_key)
+                    break
 
                 logger.debug("SDK message: %s blocks=%s",
                     type(message).__name__,
