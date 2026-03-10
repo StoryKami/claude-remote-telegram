@@ -184,20 +184,31 @@ def setup_handlers(
             if html == self._last_rendered:
                 return
             self._last_rendered = html
-            # Delete old status and send new one at bottom
             if self.msg:
                 try:
-                    await self.msg.delete()
+                    await self.msg.edit_text(html, parse_mode="HTML", reply_markup=self._stop_kb)
+                    return
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after)
                 except Exception:
                     pass
+            # First time or edit failed — send new
             try:
                 self.msg = await self._chat_msg.answer(
                     html, parse_mode="HTML", reply_markup=self._stop_kb,
                 )
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after)
             except Exception:
                 pass
+
+        async def finalize(self, html: str) -> None:
+            """Convert current status msg to a permanent message, then start fresh."""
+            if self.msg:
+                try:
+                    await self.msg.edit_text(html, parse_mode="HTML", reply_markup=None)
+                except Exception:
+                    pass
+            self.msg = None
+            self._last_rendered = ""
 
         async def delete(self) -> None:
             """Remove status message."""
@@ -284,7 +295,7 @@ def setup_handlers(
         had_tools = False  # True if current group has any tools
 
         async def _flush_group() -> None:
-            """Send current group: thought as text, tools as expandable."""
+            """Convert current status msg to completed group, then reset for next."""
             nonlocal group_text, group_tools, had_tools
             if not group_text and not group_tools:
                 return
@@ -296,23 +307,8 @@ def setup_handlers(
                 tool_lines = "\n".join(f"✓ {desc} ({t}s)" for desc, t in group_tools)
                 parts.append(f"<blockquote expandable>{tool_lines}</blockquote>")
             html = "\n".join(parts)
-            try:
-                await message.answer(html, parse_mode="HTML")
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after)
-                try:
-                    await message.answer(html, parse_mode="HTML")
-                except Exception:
-                    pass
-            except Exception:
-                # Fallback without HTML
-                plain = group_text.strip()
-                if group_tools:
-                    plain += "\n" + "\n".join(f"✓ {d} ({t}s)" for d, t in group_tools)
-                try:
-                    await message.answer(plain)
-                except Exception:
-                    pass
+            # Edit current status msg into the completed group (stays in place)
+            await tracker.finalize(html)
             group_text = ""
             group_tools = []
             had_tools = False
