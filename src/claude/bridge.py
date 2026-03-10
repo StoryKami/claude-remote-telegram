@@ -165,17 +165,23 @@ class ClaudeBridge:
                     result_session_id = message.session_id
                     cost = getattr(message, "total_cost_usd", None)
                     usage = getattr(message, "usage", None) or {}
-                    logger.debug("ResultMessage: cost=%s usage=%s", cost, usage)
-                    # Context = all input tokens (new + cached)
-                    total_input = (
-                        usage.get("input_tokens", 0)
-                        + usage.get("cache_read_input_tokens", 0)
-                        + usage.get("cache_creation_input_tokens", 0)
+                    raw_input = usage.get("input_tokens", 0)
+                    cache_read = usage.get("cache_read_input_tokens", 0)
+                    cache_create = usage.get("cache_creation_input_tokens", 0)
+                    logger.debug(
+                        "ResultMessage: cost=%s input=%s cache_read=%s cache_create=%s",
+                        cost, raw_input, cache_read, cache_create,
                     )
+                    # Context size = non-cached input + cached input (read or newly created)
+                    # These three fields are mutually exclusive partitions of total prompt tokens
+                    total_input = raw_input + cache_read + cache_create
                     usage_str = json.dumps({
                         "cost_usd": cost,
                         "input_tokens": total_input,
                         "output_tokens": usage.get("output_tokens", 0),
+                        "raw_input": raw_input,
+                        "cache_read": cache_read,
+                        "cache_create": cache_create,
                     })
                     yield StreamEvent("usage", usage_str)
                     if cost:

@@ -468,6 +468,12 @@ def setup_handlers(
                         ctx_window = MODEL_CONTEXT_WINDOWS.get(ctx_model, DEFAULT_CONTEXT_WINDOW)
                         pct = int(input_tokens / ctx_window * 100) if ctx_window else 0
 
+                        logger.debug(
+                            "Context: %d tokens (%d%%) window=%d model=%s raw=%s",
+                            input_tokens, pct, ctx_window, ctx_model,
+                            {k: usage_data.get(k) for k in ("raw_input", "cache_read", "cache_create")},
+                        )
+
                         # Notify at every 10% bracket
                         if _context_notify.get(user_id, False):
                             bracket = (pct // 10) * 10
@@ -480,7 +486,9 @@ def setup_handlers(
 
                         # Auto-compact at threshold
                         if pct >= AUTO_COMPACT_THRESHOLD * 100 and session.claude_session_id:
-                            await message.answer(f"⚠️ Context {pct}% — auto compacting...")
+                            await message.answer(
+                                f"⚠️ Context {pct}% ({input_tokens:,}/{ctx_window:,}) — auto compacting..."
+                            )
                             result = await bridge.compact_session(session.claude_session_id)
                             await message.answer(f"Compacted: {result[:200]}")
                             _session_last_pct_notified[session.id] = 0
