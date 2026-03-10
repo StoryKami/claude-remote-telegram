@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -19,10 +20,19 @@ from src.session.repository import SessionRepository
 async def main() -> None:
     settings = load_settings()
 
+    log_dir = settings.get_db_path().parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "bot.log"
+
     logging.basicConfig(
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.handlers.RotatingFileHandler(
+                log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+            ),
+        ],
     )
     logger = logging.getLogger(__name__)
 
