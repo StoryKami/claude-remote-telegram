@@ -39,6 +39,8 @@ _cancel_flags: dict[str, bool] = {}
 _message_queues: dict[str, deque[tuple[Message, str]]] = {}
 # Per-user state
 _user_modes: dict[int, str] = {}
+# Cache: claude_session_id → preview text (for naming topics from /local)
+_local_preview_cache: dict[str, str] = {}
 
 PLAN_MODE_PREFIX = (
     "[PLAN MODE] You are in plan mode. Do NOT edit, write, or create any files. "
@@ -297,7 +299,7 @@ def setup_handlers(
         session = await _resolve_session(message)
         lock = _get_session_lock(session.id)
         if lock.locked():
-            queue = _message_queues.setdefault(session.id, deque())
+            queue = _message_queues.setdefault(session.id, deque(maxlen=10))
             queue.append((message, prompt))
             await message.answer(f"Queued (#{len(queue)}). Will process after current task.")
             return
@@ -587,6 +589,11 @@ def setup_handlers(
 
         sessions_found = await asyncio.to_thread(_read_previews)
 
+        # Cache previews for topic naming in cb_local
+        for sid, preview, _mtime in sessions_found:
+            if preview:
+                _local_preview_cache[sid] = preview
+
         # Build text list + compact buttons
         lines = ["<b>Local Sessions</b>\n"]
         buttons = []
@@ -766,10 +773,7 @@ def setup_handlers(
 
         caption = message.caption or "Please analyze this image."
         prompt = f"I'm sharing an image. View it at: {filepath}\n\n{caption}"
-        try:
-            await _process_with_queue(message, prompt)
-        finally:
-            filepath.unlink(missing_ok=True)
+        await _process_with_queue(message, prompt)
 
     @r.message(F.document)
     async def handle_document(message: Message) -> None:
@@ -786,10 +790,7 @@ def setup_handlers(
 
         caption = message.caption or f"Please analyze this file: {filename}"
         prompt = f"I'm sharing a file ({filename}). Read it at: {filepath}\n\n{caption}"
-        try:
-            await _process_with_queue(message, prompt)
-        finally:
-            filepath.unlink(missing_ok=True)
+        await _process_with_queue(message, prompt)
 
     @r.message(F.text)
     async def handle_message(message: Message) -> None:

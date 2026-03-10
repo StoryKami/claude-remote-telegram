@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -119,13 +120,24 @@ class ClaudeBridge:
                 yield StreamEvent("error", f"CLI exited with code {process.returncode}: {stderr[:500]}")
             yield StreamEvent("done", accumulated_text, session_id=result_session_id)
         finally:
-            # Always ensure subprocess is cleaned up
+            # Always ensure subprocess and its children are cleaned up
             if process.returncode is None:
                 try:
-                    process.kill()
-                except ProcessLookupError:
+                    if sys.platform == "win32":
+                        # Kill entire process tree on Windows
+                        import subprocess as _sp
+                        _sp.run(
+                            ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                            capture_output=True, timeout=5,
+                        )
+                    else:
+                        process.kill()
+                except Exception:
                     pass
-                await process.wait()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except Exception:
+                    pass
             # Drain stderr to release pipe
             if process.stderr:
                 try:
