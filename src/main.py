@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import logging.handlers
+import ssl
 import sys
 
+import aiohttp
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.types import BotCommand
 
 from src.bot.handlers import router, setup_handlers
@@ -43,7 +46,13 @@ async def main() -> None:
     repository = SessionRepository(settings.get_db_path())
     await repository.initialize()
 
-    bot = Bot(token=settings.telegram_bot_token)
+    # Skip SSL verification if behind corporate VPN with MITM proxy
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    session = AiohttpSession(connector=connector)
+    bot = Bot(token=settings.telegram_bot_token, session=session)
 
     try:
         session_manager = SessionManager(
