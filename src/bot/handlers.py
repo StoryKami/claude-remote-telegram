@@ -674,8 +674,15 @@ def setup_handlers(
         claude_session_id = callback.data.split(":", 1)[1]
         user_id = callback.from_user.id
         chat = callback.message.chat
-        short_id = claude_session_id[:12]
-        name = f"local-{short_id}"
+
+        # Use cached preview as topic name, fallback to short ID
+        preview = _local_preview_cache.pop(claude_session_id, "")
+        if preview:
+            name = preview[:30].replace("\n", " ").strip()
+            if len(preview) > 30:
+                name += "..."
+        else:
+            name = f"local-{claude_session_id[:8]}"
 
         # In forum group: create a new topic for this local session
         if chat.is_forum and callback.message.bot:
@@ -687,12 +694,12 @@ def setup_handlers(
                 await session_manager.set_claude_session_id(session.id, claude_session_id)
                 await callback.message.bot.send_message(
                     chat.id,
-                    f"Connected to local session: {short_id}...",
+                    f"Connected: {name}",
                     message_thread_id=topic.message_thread_id,
                 )
-                await callback.answer(f"Topic created: {name}")
+                await callback.answer(f"Topic: {name}")
                 try:
-                    await callback.message.edit_text(f"Opened topic: {name}")
+                    await callback.message.edit_text(f"Opened: {name}")
                 except Exception:
                     pass
                 return
