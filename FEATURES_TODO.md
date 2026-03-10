@@ -110,6 +110,36 @@
 
 ## P3 — 아이디어 (미래)
 
+### 멀티 머신 지원
+- [ ] 하나의 Telegram 그룹에서 여러 컴퓨터의 Claude Code 제어
+- [ ] 머신별 토픽 or 채널
+- 참고: chadingTV/claudecode-discord (한 Discord에서 여러 PC 관리)
+
+### Kanban 세션 UI
+- [ ] 세션을 칸반 보드 형태로 관리
+- [ ] 세션별 목표/상태/브랜치/PR 표시
+- 참고: KyleAMathews/claude-code-ui
+
+### 음성 TTS 응답
+- [ ] Claude 응답을 음성으로 변환해서 Telegram 음성 메시지로 전송
+- [ ] hands-free 워크플로우
+- 참고: Helmi/CCNotify (50+ 음성, 이벤트별 알림)
+
+### 인라인 키보드 액션 버튼
+- [ ] 도구 실행 결과에 액션 버튼 추가 (예: "이 파일 열기", "diff 보기")
+- [ ] 대화형 워크플로우
+- 참고: linuz90/claude-telegram-bot (ask_user MCP)
+
+### SMS 기반 제어 (최소 인프라)
+- [ ] SMS로 명령 보내고 결과 받기
+- [ ] 인터넷 앱 없이도 작동
+- 참고: cyzhao/claude-code-tools
+
+### 세션 컨텍스트 이전 (worktree)
+- [ ] git worktree 간 세션 데이터 복사
+- [ ] 브랜치 전환 시 대화 기록 유지
+- 참고: kbwo/ccmanager
+
 ### Desktop Companion App
 - [ ] Tauri/Electron 기반 데스크탑 앱
 - [ ] Telegram + 웹 + 데스크탑 동시 지원
@@ -147,6 +177,11 @@
 | 247 | Web | Cloudflare Tunnel | 모바일 우선, 터치 최적화 |
 | opcode | Desktop | Tauri | 토큰 모니터링, kill switch |
 | Claude Push | 알림 | bash+ntfy | 60줄, 3분 셋업 |
+| claudecodeui | Web | CLI wrapper | 7.8k stars, IDE-like 브라우저 UX |
+| claude-squad | Terminal | worktree | 6.3k stars, 멀티 에이전트 병렬 관리 |
+| afk-code | Telegram/Discord/Slack | PTY | 플랫폼 무관, 이미지 자동 업로드 |
+| chadingTV | Discord | SDK | 멀티 머신 관리 (1 Discord → N PC) |
+| claude-notifications-go | 웹훅 | hooks | 엔터프라이즈급 알림 (circuit breaker) |
 | **우리 (claude-remote-telegram)** | **Telegram** | **SDK** | **Forum Topics, Clone/Fork, Safe mode, expandable log** |
 
 ---
