@@ -79,13 +79,7 @@ async def main() -> None:
         except Exception:
             pass
         restart_file.unlink(missing_ok=True)
-    else:
-        # Cold start — notify all users via DM
-        for uid in settings.get_allowed_user_ids():
-            try:
-                await bot.send_message(uid, "Bot started.")
-            except Exception:
-                pass
+    # No DM on cold start — silent
 
     logger.info("Workspace: %s", settings.get_workspace_path())
     logger.info("Bot starting...")
