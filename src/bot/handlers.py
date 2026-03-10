@@ -170,7 +170,8 @@ def setup_handlers(
             self.hint = ""
             self.current_tool = ""
             self.steps: list[tuple[str, int]] = []  # all steps for final log
-            self.last_text = ""  # last thinking/text snippet for preview
+            self.thinking_text = ""  # thinking preview (persists)
+            self.writing_text = ""  # text/writing preview (persists)
             self._frame_idx = 0
             self._last_rendered = ""
             self._stopped = False
@@ -199,10 +200,13 @@ def setup_handlers(
             if self.hint and not self.current_tool and not self.steps:
                 parts.append(f"&gt; {self.hint}")
 
-            # Show last text (thinking snippet or writing preview)
-            if self.last_text:
-                preview = self.last_text[-150:].replace("<", "&lt;").replace(">", "&gt;")
-                parts.append(f"\n{preview}")
+            # Show thinking and writing previews (both can coexist)
+            if self.thinking_text:
+                t = self.thinking_text[-120:].replace("<", "&lt;").replace(">", "&gt;")
+                parts.append(f"\n💭 {t}")
+            if self.writing_text:
+                w = self.writing_text[-120:].replace("<", "&lt;").replace(">", "&gt;")
+                parts.append(f"✏️ {w}")
 
             # Completed steps as expandable
             if self.steps:
@@ -381,17 +385,14 @@ def setup_handlers(
 
                 if event.type == "thinking":
                     accumulated_thinking += event.data
-                    snippet = accumulated_thinking[-150:].replace("\n", " ").strip()
                     tracker.phase = "Thinking..."
-                    tracker.last_text = f"💭 {snippet}"
+                    tracker.thinking_text = accumulated_thinking[-120:].replace("\n", " ").strip()
 
                 elif event.type == "text":
                     accumulated_text += event.data
                     current_segment += event.data
-                    # Show live preview in status
                     tracker.phase = "Writing..."
-                    preview = current_segment[-150:].replace("\n", " ").strip()
-                    tracker.last_text = f"✏️ {preview}"
+                    tracker.writing_text = current_segment[-120:].replace("\n", " ").strip()
 
                 elif event.type == "tool_use":
                     # New tool after text = save current segment as intermediate
