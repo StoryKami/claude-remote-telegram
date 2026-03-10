@@ -163,6 +163,7 @@ def setup_handlers(
             self.hint = ""
             self.current_tool = ""
             self.steps: list[tuple[str, int]] = []  # all steps for final log
+            self.last_text = ""  # last thinking/text snippet for preview
             self._frame_idx = 0
             self._last_rendered = ""
             self._stopped = False
