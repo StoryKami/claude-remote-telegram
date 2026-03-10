@@ -171,7 +171,7 @@ def setup_handlers(
             else:
                 parts.append(f"{spinner} {self.phase}")
 
-            if self.hint and not self.current_tool:
+            if self.hint and not self.current_tool and not self.steps:
                 parts.append(f"&gt; {self.hint}")
 
             # Elapsed at the end
@@ -192,13 +192,14 @@ def setup_handlers(
                     await asyncio.sleep(e.retry_after)
                 except Exception:
                     pass
-            # First time or edit failed — send new
-            try:
-                self.msg = await self._chat_msg.answer(
-                    html, parse_mode="HTML", reply_markup=self._stop_kb,
-                )
-            except Exception:
-                pass
+            # First time only — send new (don't resend on edit failure)
+            if not self.msg:
+                try:
+                    self.msg = await self._chat_msg.answer(
+                        html, parse_mode="HTML", reply_markup=self._stop_kb,
+                    )
+                except Exception:
+                    pass
 
         async def finalize(self, html: str) -> None:
             """Convert current status msg to a permanent message, then start fresh."""
