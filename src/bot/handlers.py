@@ -704,15 +704,19 @@ def setup_handlers(
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="Share (same context)",
-                        callback_data=f"local_force:{claude_session_id}",
+                        text="Continue",
+                        callback_data=f"local_continue:{claude_session_id}:{existing.topic_id}",
                     ),
                     InlineKeyboardButton(
-                        text="Clone (new context)",
+                        text="Clone (fork)",
                         callback_data=f"local_clone:{claude_session_id}",
                     ),
                 ],
                 [
+                    InlineKeyboardButton(
+                        text="Share (link)",
+                        callback_data=f"local_force:{claude_session_id}",
+                    ),
                     InlineKeyboardButton(text="Cancel", callback_data="local_cancel"),
                 ],
             ])
@@ -720,9 +724,10 @@ def setup_handlers(
             if callback.message:
                 try:
                     await callback.message.edit_text(
-                        f"This session is already in topic: {existing.name}\n\n"
-                        "Share = same Claude context (messages affect both)\n"
-                        "Clone = fresh topic, no shared context",
+                        f"Session already in: {existing.name}\n\n"
+                        "Continue = go to existing topic\n"
+                        "Clone = fork (same history, diverges)\n"
+                        "Share = new topic, shared context",
                         reply_markup=keyboard,
                     )
                 except Exception:
@@ -763,9 +768,63 @@ def setup_handlers(
         except Exception:
             await callback.message.answer(text)
 
+    @r.callback_query(F.data.startswith("local_continue:"))
+    async def cb_local_continue(callback: CallbackQuery) -> None:
+        """Continue: go to existing topic, or recreate if deleted."""
+        assert callback.from_user and callback.data and callback.message
+        parts = callback.data.split(":")
+        claude_session_id = parts[1]
+        topic_id = int(parts[2])
+        chat = callback.message.chat
+        bot = callback.message.bot
+        assert bot
+
+        # Try to send a message to the existing topic
+        try:
+            await bot.send_message(
+                chat.id, "Resumed here.",
+                message_thread_id=topic_id,
+            )
+            await callback.answer("Resumed in existing topic")
+            try:
+                await callback.message.edit_text("Continued in existing topic.")
+            except Exception:
+                pass
+            return
+        except Exception:
+            pass
+
+        # Topic was deleted — recreate
+        existing = await session_manager.find_by_claude_session_id(claude_session_id)
+        name = existing.name if existing else f"resumed-{claude_session_id[:8]}"
+        try:
+            topic = await bot.create_forum_topic(chat.id, name)
+            if existing:
+                await session_manager._repo.update_session(
+                    existing.id, topic_id=topic.message_thread_id,
+                )
+            else:
+                user_id = callback.from_user.id
+                session = await session_manager.create_session(
+                    user_id, name, topic_id=topic.message_thread_id,
+                )
+                await session_manager.set_claude_session_id(session.id, claude_session_id)
+            await bot.send_message(
+                chat.id, f"Topic recreated: {name}",
+                message_thread_id=topic.message_thread_id,
+            )
+            await callback.answer("Topic recreated")
+            try:
+                await callback.message.edit_text(f"Reopened: {name}")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.exception("local_continue error")
+            await callback.answer("Error recreating topic", show_alert=True)
+
     @r.callback_query(F.data.startswith("local_force:"))
     async def cb_local_force(callback: CallbackQuery) -> None:
-        """Share: create topic with same Claude session (shared context)."""
+        """Share: create new topic with same Claude session (shared context)."""
         assert callback.from_user and callback.data and callback.message
         claude_session_id = callback.data.split(":", 1)[1]
         user_id = callback.from_user.id
