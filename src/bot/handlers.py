@@ -530,9 +530,17 @@ def setup_handlers(
         if not name:
             await message.answer("Usage: /rename <new name>")
             return
-        session = await session_manager.get_or_create_active(message.from_user.id)
+        session = await _resolve_session(message)
         await session_manager.rename_session(message.from_user.id, session.id, name)
-        await message.answer(f"Renamed to: **{name}**", parse_mode="Markdown")
+        # Also rename Telegram topic if in forum
+        if session.topic_id and message.bot and message.chat.is_forum:
+            try:
+                await message.bot.edit_forum_topic(
+                    message.chat.id, session.topic_id, name=name,
+                )
+            except Exception:
+                pass
+        await message.answer(f"Renamed to: {name}")
 
     @r.message(Command("delete"))
     async def cmd_delete(message: Message) -> None:
