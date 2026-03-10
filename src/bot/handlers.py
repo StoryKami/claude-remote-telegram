@@ -217,19 +217,29 @@ def setup_handlers(
                 pass
 
         async def refresh(self) -> None:
-            """Update existing status message. Never creates new messages."""
-            if self._stopped or not self.msg:
+            """Update existing status message, or create first one if needed."""
+            if self._stopped:
                 return
             html = self.render()
             if html == self._last_rendered:
                 return
             self._last_rendered = html
-            try:
-                await self.msg.edit_text(html, parse_mode="HTML", reply_markup=self._stop_kb)
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after)
-            except Exception:
-                pass
+            if self.msg:
+                try:
+                    await self.msg.edit_text(html, parse_mode="HTML", reply_markup=self._stop_kb)
+                    return
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after)
+                except Exception:
+                    pass
+            # First time — create status message
+            if not self.msg:
+                try:
+                    self.msg = await self._chat_msg.answer(
+                        html, parse_mode="HTML", reply_markup=self._stop_kb,
+                    )
+                except Exception:
+                    pass
 
         async def finalize(self, html: str) -> None:
             """Convert current status msg to permanent, prepare for next group."""
