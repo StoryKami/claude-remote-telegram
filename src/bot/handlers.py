@@ -38,6 +38,8 @@ router = Router()
 _session_locks: dict[str, asyncio.Lock] = {}
 _cancel_flags: dict[str, bool] = {}
 _message_queues: dict[str, deque[tuple[Message, str]]] = {}
+# Per Claude session lock (prevents concurrent --resume on same CLI session)
+_claude_session_locks: dict[str, asyncio.Lock] = {}
 # Per-user state
 _user_modes: dict[int, str] = {}
 # Cache: claude_session_id → preview text (for naming topics from /local)
@@ -59,6 +61,13 @@ def _is_valid_session_id(sid: str) -> bool:
 
 def _get_session_lock(session_id: str) -> asyncio.Lock:
     return _session_locks.setdefault(session_id, asyncio.Lock())
+
+
+def _get_claude_lock(claude_session_id: str | None) -> asyncio.Lock | None:
+    """Get lock for a Claude CLI session to prevent concurrent --resume."""
+    if not claude_session_id:
+        return None
+    return _claude_session_locks.setdefault(claude_session_id, asyncio.Lock())
 
 
 def _extract_text(content: object) -> str:
@@ -272,11 +281,18 @@ def setup_handlers(
                     parse_mode="HTML",
                     reply_markup=None,
                 )
-            except Exception:
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after)
                 try:
-                    await status_msg.delete()
+                    await status_msg.edit_text(
+                        f'<blockquote expandable>{log_html}</blockquote>',
+                        parse_mode="HTML",
+                        reply_markup=None,
+                    )
                 except Exception:
                     pass
+            except Exception:
+                pass  # keep the message, don't delete
 
         chunks = format_telegram_message(accumulated_text)
         for chunk in chunks:
