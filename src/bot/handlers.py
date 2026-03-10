@@ -1045,15 +1045,17 @@ def setup_handlers(
         group = _media_groups.pop(group_id, None)
         if not group:
             return
-        paths = group["paths"]
+        # Sort by message_id to maintain Telegram display order
+        items = sorted(group["items"], key=lambda x: x[0])
+        paths = [filepath for _, filepath in items]
         caption = group["caption"] or "Please analyze these images."
         message = group["message"]
 
         if len(paths) == 1:
             prompt = f"I'm sharing an image. View it at: {paths[0]}\n\n{caption}"
         else:
-            file_list = "\n".join(f"- {p}" for p in paths)
-            prompt = f"I'm sharing {len(paths)} images. View them at:\n{file_list}\n\n{caption}"
+            file_list = "\n".join(f"- Image {i+1}: {p}" for i, p in enumerate(paths))
+            prompt = f"I'm sharing {len(paths)} images. View them in order:\n{file_list}\n\n{caption}"
 
         await _process_with_queue(message, prompt)
 
@@ -1073,12 +1075,12 @@ def setup_handlers(
             # Part of a media group — buffer and wait for more
             if group_id not in _media_groups:
                 _media_groups[group_id] = {
-                    "paths": [],
+                    "items": [],  # (message_id, filepath) for sorting
                     "caption": message.caption,
                     "message": message,
                     "timer": None,
                 }
-            _media_groups[group_id]["paths"].append(str(filepath))
+            _media_groups[group_id]["items"].append((message.message_id, str(filepath)))
             if message.caption:
                 _media_groups[group_id]["caption"] = message.caption
 
