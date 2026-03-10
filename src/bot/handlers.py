@@ -150,6 +150,7 @@ def setup_handlers(
             self.steps: list[tuple[str, int]] = []  # all steps for final log
             self._frame_idx = 0
             self._last_rendered = ""
+            self._stopped = False
             self._stop_kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="■ Stop", callback_data=f"stop:{session_id}"),
                 InlineKeyboardButton(text="■ Stop All", callback_data=f"stopall:{session_id}"),
@@ -171,15 +172,27 @@ def setup_handlers(
             else:
                 parts.append(f"{spinner} {self.phase}")
 
+            # Show hint only before any tools run
             if self.hint and not self.current_tool and not self.steps:
                 parts.append(f"&gt; {self.hint}")
 
-            # Elapsed at the end
-            parts.append(f"\n⏱ {e}s")
+            # Show last text (thinking snippet or writing preview)
+            if self.last_text:
+                preview = self.last_text[-150:].replace("<", "&lt;").replace(">", "&gt;")
+                parts.append(f"\n{preview}")
+
+            # Completed steps as expandable
+            if self.steps:
+                log_lines = [f"✓ {name} ({t}s)" for name, t in self.steps[-6:]]
+                parts.append(f'\n<blockquote expandable>{chr(10).join(log_lines)}</blockquote>')
+
+            parts.append(f"⏱ {e}s")
 
             return "\n".join(parts)
 
         async def refresh(self) -> None:
+            if self._stopped:
+                return
             html = self.render()
             if html == self._last_rendered:
                 return
@@ -210,9 +223,11 @@ def setup_handlers(
                     pass
             self.msg = None
             self._last_rendered = ""
+            # Don't set _stopped — allow new status msg for next group
 
         async def delete(self) -> None:
-            """Remove status message."""
+            """Remove status message and stop all future refreshes."""
+            self._stopped = True
             if self.msg:
                 try:
                     await self.msg.delete()
@@ -409,14 +424,19 @@ def setup_handlers(
             return
 
         # Flush last intermediate group (if it had tools)
+        remaining_text = group_text  # save before flush clears it
         if group_tools:
             await _flush_group()
+            remaining_text = ""  # already flushed
 
-        # Remove status message — groups are already sent
+        # Remove status message
         await tracker.delete()
 
-        # Send final answer (clean)
-        final_text = group_text if not had_tools else accumulated_text
+        # Send final answer
+        final_text = remaining_text.strip() if remaining_text else ""
+        if not final_text and not group_tools and accumulated_text:
+            # No groups were flushed, send entire accumulated text
+            final_text = accumulated_text.strip()
         if final_text:
             chunks = format_telegram_message(final_text.strip())
             for chunk in chunks:
