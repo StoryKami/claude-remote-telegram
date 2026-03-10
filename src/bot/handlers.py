@@ -401,8 +401,7 @@ def setup_handlers(
                     had_tools_before = True
                     tracker.phase = "Working..."
                     tracker.current_tool = event.data
-                    tracker.last_text = ""
-                    # Let ticker handle refresh (every 3s)
+                    # Keep last_text (thinking/writing preview) visible during tool execution
 
                 elif event.type == "tool_result":
                     step = (tracker.current_tool or "?", tracker.elapsed())
