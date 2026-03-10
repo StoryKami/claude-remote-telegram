@@ -84,6 +84,7 @@ class ClaudeBridge:
         permission_mode: str | None = None,
         permission_callback: PermissionCallback | None = None,
         model: str | None = None,
+        effort: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         mode = permission_mode or self._default_permission_mode
 
@@ -108,6 +109,9 @@ class ClaudeBridge:
         effective_model = model or self._model
         if effective_model:
             options.model = effective_model
+        if effort and effort in ("low", "medium", "high"):
+            EFFORT_BUDGET = {"low": 1024, "medium": 10000, "high": 50000}
+            options.extra_args["budget-tokens"] = str(EFFORT_BUDGET[effort])
         if claude_session_id:
             options.resume = claude_session_id
 

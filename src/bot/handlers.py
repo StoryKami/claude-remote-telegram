@@ -41,6 +41,8 @@ _message_queues: dict[str, deque[tuple[Message, str]]] = {}
 # Per-user state
 _user_modes: dict[int, str] = {}
 _user_models: dict[int, str] = {}  # user_id → model override
+_user_1m: dict[int, bool] = {}  # user_id → 1M context enabled
+_user_effort: dict[int, str] = {}  # user_id → effort level (low/medium/high)
 _context_notify: dict[int, bool] = {}  # user_id → context % notification on/off
 # Per-session context tracking
 _session_input_tokens: dict[str, int] = {}  # session_id → last known input tokens
@@ -379,13 +381,21 @@ def setup_handlers(
             had_tools = False
 
         try:
+            # Build effective model with 1M suffix
+            effective_model = _user_models.get(user_id)
+            if effective_model and _user_1m.get(user_id):
+                if "[1m]" not in effective_model:
+                    effective_model = f"{effective_model}[1m]"
+            effort = _user_effort.get(user_id)
+
             async for event in bridge.send_message(
                 prompt=prompt,
                 claude_session_id=session.claude_session_id,
                 process_key=session.id,
                 permission_mode=sdk_permission_mode,
                 permission_callback=permission_cb,
-                model=_user_models.get(user_id),
+                model=effective_model,
+                effort=effort,
             ):
                 if _cancel_flags.get(session.id):
                     raise asyncio.CancelledError()
@@ -434,9 +444,11 @@ def setup_handlers(
                         input_tokens = usage_data.get("input_tokens", 0)
                         _session_input_tokens[session.id] = input_tokens
 
-                        # Determine context window for current model
-                        effective_model = _user_models.get(user_id, "") or bridge._model or ""
-                        ctx_window = MODEL_CONTEXT_WINDOWS.get(effective_model, DEFAULT_CONTEXT_WINDOW)
+                        # Determine context window for current model (with 1M suffix)
+                        ctx_model = _user_models.get(user_id, "") or bridge._model or ""
+                        if ctx_model and _user_1m.get(user_id) and "[1m]" not in ctx_model:
+                            ctx_model = f"{ctx_model}[1m]"
+                        ctx_window = MODEL_CONTEXT_WINDOWS.get(ctx_model, DEFAULT_CONTEXT_WINDOW)
                         pct = int(input_tokens / ctx_window * 100) if ctx_window else 0
 
                         # Notify at every 10% bracket
@@ -819,13 +831,16 @@ def setup_handlers(
             # Show current context info
             session = await _resolve_session(message)
             tokens = _session_input_tokens.get(session.id, 0)
-            effective_model = _user_models.get(user_id, "") or bridge._model or ""
-            ctx_window = MODEL_CONTEXT_WINDOWS.get(effective_model, DEFAULT_CONTEXT_WINDOW)
+            ctx_model = _user_models.get(user_id, "") or bridge._model or ""
+            if ctx_model and _user_1m.get(user_id) and "[1m]" not in ctx_model:
+                ctx_model = f"{ctx_model}[1m]"
+            ctx_window = MODEL_CONTEXT_WINDOWS.get(ctx_model, DEFAULT_CONTEXT_WINDOW)
             pct = int(tokens / ctx_window * 100) if ctx_window else 0
             notify_status = "ON" if _context_notify.get(user_id, False) else "OFF"
+            effort = _user_effort.get(user_id, "high")
             await message.answer(
                 f"📊 Context: {pct}% ({tokens:,} / {ctx_window:,} tokens)\n"
-                f"Model: {effective_model or 'default'}\n"
+                f"Model: {ctx_model or 'default'} | Effort: {effort}\n"
                 f"Notifications: {notify_status}\n\n"
                 f"/context on — enable 10% notifications\n"
                 f"/context off — disable"
@@ -960,75 +975,143 @@ def setup_handlers(
         "sonnet": "claude-sonnet-4-6",
         "haiku": "claude-haiku-4-5-20251001",
     }
+    EFFORT_LEVELS = ("low", "medium", "high")
+
+    def _model_settings_text(user_id: int) -> str:
+        """Build current model settings display text."""
+        model = _user_models.get(user_id, "default")
+        model_label = model
+        for short, full in AVAILABLE_MODELS.items():
+            if model == full:
+                model_label = short
+                break
+        ext_1m = _user_1m.get(user_id, False)
+        effort = _user_effort.get(user_id, "high")
+        return (
+            f"<b>Model:</b> {model_label}"
+            f"{'  [1M]' if ext_1m else ''}\n"
+            f"<b>Effort:</b> {effort}"
+        )
+
+    def _model_keyboard(user_id: int) -> InlineKeyboardMarkup:
+        """Build inline keyboard for model settings."""
+        current_model = _user_models.get(user_id, "default")
+        ext_1m = _user_1m.get(user_id, False)
+        effort = _user_effort.get(user_id, "high")
+
+        # Row 1: Model selection
+        model_buttons = []
+        for short, full in AVAILABLE_MODELS.items():
+            label = f"● {short}" if current_model == full else short
+            model_buttons.append(InlineKeyboardButton(
+                text=label, callback_data=f"mset:m:{short}",
+            ))
+        default_label = "● default" if current_model == "default" else "default"
+        model_buttons.append(InlineKeyboardButton(
+            text=default_label, callback_data="mset:m:default",
+        ))
+
+        # Row 2: 1M context toggle (only for opus)
+        can_1m = current_model in ("claude-opus-4-6", "default")
+        ctx_label = "1M: ON ●" if ext_1m else "1M: OFF"
+        ctx_buttons = [InlineKeyboardButton(
+            text=ctx_label,
+            callback_data="mset:1m:toggle" if can_1m else "mset:1m:na",
+        )]
+
+        # Row 3: Effort
+        effort_buttons = []
+        for lvl in EFFORT_LEVELS:
+            label = f"● {lvl}" if effort == lvl else lvl
+            effort_buttons.append(InlineKeyboardButton(
+                text=label, callback_data=f"mset:e:{lvl}",
+            ))
+
+        return InlineKeyboardMarkup(inline_keyboard=[
+            model_buttons,
+            ctx_buttons,
+            effort_buttons,
+        ])
 
     @r.message(Command("model"))
     async def cmd_model(message: Message) -> None:
         assert message.from_user
         user_id = message.from_user.id
-        arg = _cmd_arg(message.text, "model").lower()
+        await message.answer(
+            _model_settings_text(user_id),
+            parse_mode="HTML",
+            reply_markup=_model_keyboard(user_id),
+        )
 
-        if arg:
-            new_model = AVAILABLE_MODELS.get(arg, arg if arg not in ("default", "reset", "auto") else "")
-
-            # Check if switching to a smaller context window needs compact
-            if new_model:
-                session = await _resolve_session(message)
-                tokens = _session_input_tokens.get(session.id, 0)
-                new_ctx = MODEL_CONTEXT_WINDOWS.get(new_model, DEFAULT_CONTEXT_WINDOW)
-                if tokens > 0 and tokens > new_ctx * 0.8 and session.claude_session_id:
-                    await message.answer(
-                        f"⚠️ Current context ({tokens:,} tokens) exceeds 80% of {new_model}'s window ({new_ctx:,}). Compacting first..."
-                    )
-                    result = await bridge.compact_session(session.claude_session_id)
-                    await message.answer(f"Compacted: {result[:200]}")
-                    _session_last_pct_notified.pop(session.id, None)
-
-            if arg in AVAILABLE_MODELS:
-                _user_models[user_id] = AVAILABLE_MODELS[arg]
-                await message.answer(f"Model: {arg} ({AVAILABLE_MODELS[arg]})")
-            elif arg in ("default", "reset", "auto"):
-                _user_models.pop(user_id, None)
-                await message.answer("Model: default (from config)")
-            else:
-                _user_models[user_id] = arg
-                await message.answer(f"Model: {arg}")
-        else:
-            current = _user_models.get(user_id, "default")
-            buttons = []
-            for short, full in AVAILABLE_MODELS.items():
-                prefix = "> " if current == full else ""
-                buttons.append(InlineKeyboardButton(
-                    text=f"{prefix}{short}", callback_data=f"model:{short}",
-                ))
-            buttons.append(InlineKeyboardButton(
-                text=f"{'> ' if current == 'default' else ''}default",
-                callback_data="model:default",
-            ))
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
-            await message.answer(
-                f"Current model: {current}\n\nopus / sonnet / haiku / default",
-                reply_markup=keyboard,
-            )
-
-    @r.callback_query(F.data.startswith("model:"))
-    async def cb_model(callback: CallbackQuery) -> None:
+    @r.callback_query(F.data.startswith("mset:"))
+    async def cb_model_settings(callback: CallbackQuery) -> None:
         assert callback.from_user and callback.data
-        choice = callback.data.split(":", 1)[1]
         user_id = callback.from_user.id
-        if choice == "default":
-            _user_models.pop(user_id, None)
-            label = "default"
-        elif choice in AVAILABLE_MODELS:
-            _user_models[user_id] = AVAILABLE_MODELS[choice]
-            label = f"{choice} ({AVAILABLE_MODELS[choice]})"
-        else:
-            label = choice
-        await callback.answer(f"Model: {label}")
+        parts = callback.data.split(":")
+        category = parts[1]  # m, 1m, e
+        value = parts[2] if len(parts) > 2 else ""
+
+        if category == "m":
+            # Model selection
+            if value == "default":
+                _user_models.pop(user_id, None)
+                _user_1m.pop(user_id, None)  # reset 1M on default
+            elif value in AVAILABLE_MODELS:
+                _user_models[user_id] = AVAILABLE_MODELS[value]
+                # Only opus supports 1M — disable if switching away
+                if value != "opus":
+                    _user_1m.pop(user_id, None)
+
+                # Check if context needs compact
+                session = await _resolve_session_from_callback(callback)
+                if session:
+                    new_model = AVAILABLE_MODELS[value]
+                    if _user_1m.get(user_id):
+                        new_model = f"{new_model}[1m]"
+                    tokens = _session_input_tokens.get(session.id, 0)
+                    new_ctx = MODEL_CONTEXT_WINDOWS.get(new_model, DEFAULT_CONTEXT_WINDOW)
+                    if tokens > 0 and tokens > new_ctx * 0.8 and session.claude_session_id:
+                        await callback.answer(f"Context exceeds 80% — compacting...")
+                        result = await bridge.compact_session(session.claude_session_id)
+                        _session_last_pct_notified.pop(session.id, None)
+
+            await callback.answer(f"Model: {value}")
+
+        elif category == "1m":
+            if value == "na":
+                await callback.answer("1M context only available for Opus", show_alert=True)
+                return
+            current = _user_1m.get(user_id, False)
+            _user_1m[user_id] = not current
+            await callback.answer(f"1M context: {'ON' if not current else 'OFF'}")
+
+        elif category == "e":
+            if value in EFFORT_LEVELS:
+                _user_effort[user_id] = value
+                await callback.answer(f"Effort: {value}")
+
+        # Update the message with new state
         if callback.message:
             try:
-                await callback.message.edit_text(f"Model: {label}")
+                await callback.message.edit_text(
+                    _model_settings_text(user_id),
+                    parse_mode="HTML",
+                    reply_markup=_model_keyboard(user_id),
+                )
             except Exception:
                 pass
+
+    async def _resolve_session_from_callback(callback: CallbackQuery) -> "Session | None":
+        """Try to resolve session from a callback query context."""
+        if not callback.message:
+            return None
+        try:
+            topic_id = callback.message.message_thread_id
+            if topic_id:
+                return await session_manager.get_session_by_topic(topic_id)
+            return await session_manager.get_or_create_active(callback.from_user.id)
+        except Exception:
+            return None
 
     @r.callback_query(F.data.startswith("perm_allow:"))
     async def cb_perm_allow(callback: CallbackQuery) -> None:
