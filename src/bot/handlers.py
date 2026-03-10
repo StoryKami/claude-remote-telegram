@@ -432,6 +432,13 @@ def setup_handlers(
                             _session_cost[session.id] = (
                                 _session_cost.get(session.id, 0) + cost_usd
                             )
+                        # Persist to DB
+                        await session_manager.update_usage(
+                            session.id,
+                            input_tokens=_session_input_tokens[session.id],
+                            output_tokens=_session_output_tokens[session.id],
+                            cost_usd=_session_cost.get(session.id, 0),
+                        )
 
                         # Determine context window for current model (with 1M suffix)
                         ctx_model = _user_models.get(user_id, "") or bridge._model or ""
@@ -792,16 +799,16 @@ def setup_handlers(
         # Mode
         mode = _user_modes.get(user_id, "code")
 
-        # Context
-        input_tokens = _session_input_tokens.get(session.id, 0)
+        # Context — in-memory first, DB fallback
+        input_tokens = _session_input_tokens.get(session.id) or session.input_tokens
         ctx_window = MODEL_CONTEXT_WINDOWS.get(display_model, DEFAULT_CONTEXT_WINDOW)
         pct = int(input_tokens / ctx_window * 100) if ctx_window else 0
         bar_filled = pct // 5  # 20 chars total
         bar = "█" * bar_filled + "░" * (20 - bar_filled)
 
-        # Cost & output
-        output_tokens = _session_output_tokens.get(session.id, 0)
-        cost = _session_cost.get(session.id, 0)
+        # Cost & output — in-memory first, DB fallback
+        output_tokens = _session_output_tokens.get(session.id) or session.output_tokens
+        cost = _session_cost.get(session.id) or session.cost_usd
 
         # Session info
         sid = session.claude_session_id or "—"

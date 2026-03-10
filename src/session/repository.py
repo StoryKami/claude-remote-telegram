@@ -36,12 +36,18 @@ class SessionRepository:
         self._db = await aiosqlite.connect(str(self._db_path))
         self._db.row_factory = aiosqlite.Row
 
-        # Migrate first: add topic_id column if missing
-        try:
-            await self._db.execute("ALTER TABLE sessions ADD COLUMN topic_id INTEGER")
-            await self._db.commit()
-        except Exception:
-            pass  # column already exists or table doesn't exist yet
+        # Migrations: add columns if missing
+        for col, coltype in [
+            ("topic_id", "INTEGER"),
+            ("input_tokens", "INTEGER DEFAULT 0"),
+            ("output_tokens", "INTEGER DEFAULT 0"),
+            ("cost_usd", "REAL DEFAULT 0"),
+        ]:
+            try:
+                await self._db.execute(f"ALTER TABLE sessions ADD COLUMN {col} {coltype}")
+                await self._db.commit()
+            except Exception:
+                pass  # column already exists
 
         await self._db.executescript(SCHEMA)
         await self._db.execute("PRAGMA journal_mode=WAL")
@@ -125,7 +131,8 @@ class SessionRepository:
         return [_row_to_session(row) for row in rows]
 
     _ALLOWED_UPDATE_FIELDS = frozenset({
-        "name", "claude_session_id", "is_active", "topic_id", "updated_at",
+        "name", "claude_session_id", "is_active", "topic_id",
+        "input_tokens", "output_tokens", "cost_usd", "updated_at",
     })
 
     async def update_session(self, session_id: str, **fields: object) -> None:
@@ -166,13 +173,17 @@ class SessionRepository:
 
 
 def _row_to_session(row: aiosqlite.Row) -> Session:
+    keys = row.keys()
     return Session(
         id=row["id"],
         user_id=row["user_id"],
         name=row["name"],
         claude_session_id=row["claude_session_id"],
         is_active=bool(row["is_active"]),
-        topic_id=row["topic_id"] if "topic_id" in row.keys() else None,
+        topic_id=row["topic_id"] if "topic_id" in keys else None,
+        input_tokens=row["input_tokens"] if "input_tokens" in keys else 0,
+        output_tokens=row["output_tokens"] if "output_tokens" in keys else 0,
+        cost_usd=row["cost_usd"] if "cost_usd" in keys else 0.0,
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
