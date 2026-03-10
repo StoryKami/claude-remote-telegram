@@ -230,6 +230,10 @@ def setup_handlers(
 
                 if event.type == "thinking":
                     accumulated_thinking += event.data
+                    # Show thinking snippet in tracker (last 150 chars for real-time)
+                    snippet = accumulated_thinking[-150:].replace("\n", " ").strip()
+                    tracker.phase = "Thinking..."
+                    tracker.last_text = f"💭 {snippet}"
 
                 elif event.type == "text":
                     accumulated_text += event.data
@@ -268,8 +272,8 @@ def setup_handlers(
             elapsed = tracker.elapsed()
             log_lines = ["⛔ Stopped"]
             if accumulated_thinking:
-                thinking_preview = accumulated_thinking[-200:].replace("\n", " ").strip()
-                log_lines.append(f"\n💭 {thinking_preview}")
+                thinking_text = accumulated_thinking.replace("\n", " ").strip()
+                log_lines.append(f"\n💭 {thinking_text}")
             for step_name, step_time in tracker.steps:
                 log_lines.append(f"✓ {step_name} ({step_time}s)")
             log_lines.append(f"\n⏱ {elapsed}s")
@@ -305,10 +309,9 @@ def setup_handlers(
         total_elapsed = tracker.elapsed()
         log_lines: list[str] = []
         if accumulated_thinking:
-            thinking_preview = accumulated_thinking[-300:].replace("\n", " ").strip()
-            if len(accumulated_thinking) > 300:
-                thinking_preview = "..." + thinking_preview
-            log_lines.append(f"💭 {thinking_preview}")
+            # Full thinking in expandable — no truncation needed
+            thinking_text = accumulated_thinking.replace("\n", " ").strip()
+            log_lines.append(f"💭 {thinking_text}")
             log_lines.append("")
         for step_name, step_time in tracker.steps:
             log_lines.append(f"✓ {step_name} ({step_time}s)")
