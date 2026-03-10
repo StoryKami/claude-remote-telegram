@@ -321,6 +321,7 @@ def setup_handlers(
         ticker_task = asyncio.create_task(_run_status_ticker(tracker))
         accumulated_text = ""
         accumulated_thinking = ""
+        all_steps: list[tuple[str, int]] = []  # all steps across groups (for final summary)
 
         # Permission callback for safe mode
         async def _ask_permission(tool_name: str, params: dict) -> bool:
@@ -376,6 +377,10 @@ def setup_handlers(
             html = "\n".join(parts)
             # Edit current status msg into the completed group (stays in place)
             await tracker.finalize(html)
+            # Reset tracker state for next group
+            tracker.last_text = ""
+            tracker.current_tool = ""
+            tracker.steps = []
             group_text = ""
             group_tools = []
             had_tools = False
@@ -426,8 +431,10 @@ def setup_handlers(
                     await tracker.refresh()
 
                 elif event.type == "tool_result":
-                    group_tools.append((tracker.current_tool or "?", tracker.elapsed()))
-                    tracker.steps.append((tracker.current_tool or "?", tracker.elapsed()))
+                    step = (tracker.current_tool or "?", tracker.elapsed())
+                    group_tools.append(step)
+                    tracker.steps.append(step)
+                    all_steps.append(step)
                     tracker.current_tool = ""
                     await tracker.refresh()
 
@@ -516,8 +523,8 @@ def setup_handlers(
         # Finalize status into summary
         elapsed = tracker.elapsed()
         summary_parts = [f"✅ Done ({elapsed}s)"]
-        if tracker.steps:
-            log_lines = [f"✓ {name} ({t}s)" for name, t in tracker.steps]
+        if all_steps:
+            log_lines = [f"✓ {name} ({t}s)" for name, t in all_steps]
             summary_parts.append(f'<blockquote expandable>{chr(10).join(log_lines)}</blockquote>')
         await tracker.finalize("\n".join(summary_parts))
 
