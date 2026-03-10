@@ -383,7 +383,10 @@ def setup_handlers(
 
                 elif event.type == "text":
                     accumulated_text += event.data
-                    # Don't show text in status — only final delivery
+                    # Show live preview in status
+                    tracker.phase = "Writing..."
+                    preview = accumulated_text[-150:].replace("\n", " ").strip()
+                    tracker.last_text = f"✏️ {preview}"
 
                 elif event.type == "tool_use":
                     tracker.phase = "Working..."
