@@ -258,14 +258,39 @@ def setup_handlers(
                         accumulated_text = event.data
 
         except asyncio.CancelledError:
-            await status_msg.edit_text("Cancelled.")
-            return  # queue processing continues in _process_with_queue
+            ticker_task.cancel()
+            # Keep progress info instead of just "Cancelled"
+            elapsed = tracker.elapsed()
+            log_lines = ["⛔ Stopped"]
+            if accumulated_thinking:
+                thinking_preview = accumulated_thinking[-200:].replace("\n", " ").strip()
+                log_lines.append(f"\n💭 {thinking_preview}")
+            for step_name, step_time in tracker.steps:
+                log_lines.append(f"✓ {step_name} ({step_time}s)")
+            log_lines.append(f"\n⏱ {elapsed}s")
+            log_html = "\n".join(log_lines)
+            try:
+                await status_msg.edit_text(
+                    f'<blockquote expandable>{log_html}</blockquote>',
+                    parse_mode="HTML", reply_markup=None,
+                )
+            except Exception:
+                try:
+                    await status_msg.edit_text(f"Stopped. ({elapsed}s)")
+                except Exception:
+                    pass
+            if accumulated_text:
+                chunks = format_telegram_message(accumulated_text)
+                for chunk in chunks:
+                    await message.answer(chunk)
+            return
         except Exception as e:
             logger.exception("Error processing message")
             await status_msg.edit_text("Error: something went wrong. Check logs for details.")
             return
         finally:
-            ticker_task.cancel()
+            if not ticker_task.done():
+                ticker_task.cancel()
 
         if not accumulated_text:
             await status_msg.edit_text("(no response)")
