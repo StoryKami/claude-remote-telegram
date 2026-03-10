@@ -140,16 +140,16 @@ if __name__ == "__main__":
             CRASH_MARKER.unlink(missing_ok=True)
             return False
 
-        print("[AUTO-REVERT] Post-pull crash detected. Reverting uncommitted changes...", flush=True)
+        print("[AUTO-REVERT] Post-pull crash detected. Reverting to previous commit...", flush=True)
         try:
-            diff = subprocess.run(
-                ["git", "diff", "--stat", "HEAD"],
+            log = subprocess.run(
+                ["git", "log", "--oneline", "-2"],
                 cwd=str(PROJECT_DIR), capture_output=True, text=True, timeout=10,
             )
-            print(f"[AUTO-REVERT] Changes:\n{diff.stdout.strip()}", flush=True)
+            print(f"[AUTO-REVERT] Commits:\n{log.stdout.strip()}", flush=True)
 
             subprocess.run(
-                ["git", "checkout", "."],
+                ["git", "reset", "--hard", "HEAD~1"],
                 cwd=str(PROJECT_DIR), capture_output=True, timeout=10,
             )
             subprocess.run(

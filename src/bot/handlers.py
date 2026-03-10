@@ -737,78 +737,51 @@ def setup_handlers(
         bridge.request_cancel(session.id)
         await message.answer("Cancelling... (queue cleared)")
 
+    async def _git(args: list[str], cwd: str | None = None) -> str:
+        """Run a git command and return stdout."""
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args,
+            cwd=cwd or str(workspace_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=15)
+        return (out or err or b"").decode("utf-8", errors="replace").strip()
+
     @r.message(Command("revert"))
     async def cmd_revert(message: Message) -> None:
-        """Revert uncommitted changes in workspace (git checkout + clean)."""
+        """Revert last commit + uncommitted changes. Usage: /revert [N]"""
         assert message.from_user
         session = await _resolve_session(message)
+        project_dir = str(Path(__file__).resolve().parent.parent.parent)
 
         # Cancel any in-progress work first
         _cancel_flags[session.id] = True
         _message_queues.pop(session.id, None)
         bridge.request_cancel(session.id)
 
-        # Check what would be reverted
+        arg = _cmd_arg(message.text, "revert").strip()
+        n = int(arg) if arg.isdigit() and 1 <= int(arg) <= 5 else 1
+
         try:
-            diff_proc = await asyncio.create_subprocess_exec(
-                "git", "diff", "--stat", "HEAD",
-                cwd=str(workspace_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            diff_out, _ = await asyncio.wait_for(diff_proc.communicate(), timeout=10)
-            diff_text = diff_out.decode("utf-8", errors="replace").strip()
+            # Show what will be reverted
+            log_text = await _git(["log", "--oneline", f"-{n + 1}"], cwd=project_dir)
+            dirty = await _git(["diff", "--stat", "HEAD"], cwd=project_dir)
 
-            # Also check untracked files
-            clean_proc = await asyncio.create_subprocess_exec(
-                "git", "clean", "-n", "-d",
-                cwd=str(workspace_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            clean_out, _ = await asyncio.wait_for(clean_proc.communicate(), timeout=10)
-            clean_text = clean_out.decode("utf-8", errors="replace").strip()
-        except Exception as e:
-            await message.answer(f"Failed to check git status: {e}")
-            return
-
-        if not diff_text and not clean_text:
-            await message.answer("Nothing to revert — workspace is clean.")
-            return
-
-        # Build preview
-        preview_parts: list[str] = []
-        if diff_text:
-            preview_parts.append(f"<b>Modified:</b>\n<pre>{diff_text[:1500]}</pre>")
-        if clean_text:
-            preview_parts.append(f"<b>Untracked (will remove):</b>\n<pre>{clean_text[:500]}</pre>")
-
-        # Perform revert
-        try:
-            checkout_proc = await asyncio.create_subprocess_exec(
-                "git", "checkout", ".",
-                cwd=str(workspace_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.wait_for(checkout_proc.communicate(), timeout=10)
-
-            clean_proc2 = await asyncio.create_subprocess_exec(
-                "git", "clean", "-fd",
-                cwd=str(workspace_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.wait_for(clean_proc2.communicate(), timeout=10)
+            # Reset to N commits back (keeps nothing)
+            await _git(["reset", "--hard", f"HEAD~{n}"], cwd=project_dir)
+            await _git(["clean", "-fd"], cwd=project_dir)
         except Exception as e:
             await message.answer(f"Revert failed: {e}")
             return
 
-        summary = "\n".join(preview_parts)
-        await message.answer(
-            f"Reverted to last commit.\n\n{summary}",
-            parse_mode="HTML",
-        )
+        parts = [f"Reverted {n} commit(s)."]
+        if log_text:
+            parts.append(f"<pre>{log_text[:1500]}</pre>")
+        if dirty:
+            parts.append(f"<b>+ uncommitted changes cleared</b>")
+
+        await message.answer("\n".join(parts), parse_mode="HTML")
 
     @r.message(Command("compact"))
     async def cmd_compact(message: Message) -> None:
