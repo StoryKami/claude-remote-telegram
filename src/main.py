@@ -50,9 +50,9 @@ async def main() -> None:
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
-    connector = aiohttp.TCPConnector(ssl=ssl_context)
-    session = AiohttpSession(connector=connector)
-    bot = Bot(token=settings.telegram_bot_token, session=session)
+    tg_session = AiohttpSession()
+    tg_session._connector_init["ssl"] = ssl_context
+    bot = Bot(token=settings.telegram_bot_token, session=tg_session)
 
     try:
         session_manager = SessionManager(
