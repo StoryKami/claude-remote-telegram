@@ -166,13 +166,16 @@ class ClaudeBridge:
                     cost = getattr(message, "total_cost_usd", None)
                     usage = getattr(message, "usage", None) or {}
                     logger.debug("ResultMessage: cost=%s usage=%s", cost, usage)
-                    # Emit usage info for context tracking
+                    # Context = all input tokens (new + cached)
+                    total_input = (
+                        usage.get("input_tokens", 0)
+                        + usage.get("cache_read_input_tokens", 0)
+                        + usage.get("cache_creation_input_tokens", 0)
+                    )
                     usage_str = json.dumps({
                         "cost_usd": cost,
-                        "input_tokens": usage.get("input_tokens", 0),
+                        "input_tokens": total_input,
                         "output_tokens": usage.get("output_tokens", 0),
-                        "cache_read": usage.get("cache_read_input_tokens", 0),
-                        "cache_creation": usage.get("cache_creation_input_tokens", 0),
                     })
                     yield StreamEvent("usage", usage_str)
                     if cost:
