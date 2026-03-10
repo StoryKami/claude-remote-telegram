@@ -13,6 +13,7 @@ Send any message to interact with Claude Code remotely. Claude has full access t
 /rename `<name>` — Rename session
 /delete `<id>` — Delete session
 /cancel — Cancel current request
+/revert — Revert uncommitted changes (git reset)
 /mode `[plan|code]` — View/switch mode
 /local — Local Claude sessions (resume any)
 /pull — Git pull + restart (원격 배포)
