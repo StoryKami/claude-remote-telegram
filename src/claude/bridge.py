@@ -102,6 +102,11 @@ class ClaudeBridge:
                     logger.info("Query cancelled for key=%s", process_key)
                     break
 
+                logger.debug("SDK message: %s blocks=%s",
+                    type(message).__name__,
+                    [type(b).__name__ for b in message.content] if hasattr(message, 'content') else "N/A",
+                )
+
                 if isinstance(message, AssistantMessage):
                     for block in message.content:
                         if isinstance(block, TextBlock):
@@ -112,13 +117,15 @@ class ClaudeBridge:
                                 yield StreamEvent("thinking", block.thinking)
                         elif isinstance(block, ToolUseBlock):
                             desc = _describe_tool(block.name, block.input if isinstance(block.input, dict) else {})
+                            logger.debug("tool_use: %s", desc)
                             yield StreamEvent("tool_use", desc)
                         elif isinstance(block, ToolResultBlock):
                             content = block.content if isinstance(block.content, str) else str(block.content)[:200]
                             yield StreamEvent("tool_result", content)
+                        else:
+                            logger.debug("Unknown block: %s", type(block).__name__)
 
                 elif isinstance(message, UserMessage):
-                    # Tool results come as UserMessage
                     yield StreamEvent("tool_result", "")
 
                 elif isinstance(message, ResultMessage):
