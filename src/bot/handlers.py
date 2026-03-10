@@ -424,7 +424,7 @@ def setup_handlers(
                 elif event.type == "error":
                     ticker_task.cancel()
                     logger.error("CLI error: %s", event.data[:500])
-                    await tracker.delete()
+                    await tracker.finalize(f"❌ Error ({tracker.elapsed()}s)")
                     await message.answer("Error: Claude CLI encountered an error. Check logs for details.")
                     return
 
@@ -472,12 +472,11 @@ def setup_handlers(
             # Flush any pending group
             await _flush_group()
             elapsed = tracker.elapsed()
-            log_lines = [f"⛔ Stopped ({elapsed}s)"]
+            stop_summary = f"⛔ Stopped ({elapsed}s)"
             if accumulated_thinking:
                 thinking_text = accumulated_thinking.replace("\n", " ").strip()
-                log_lines.append(f"\n💭 {thinking_text}")
-            await tracker.delete()
-            await message.answer("\n".join(log_lines))
+                stop_summary += f"\n💭 {thinking_text[:200]}"
+            await tracker.finalize(stop_summary)
             if accumulated_text:
                 chunks = format_telegram_message(accumulated_text)
                 for chunk in chunks:
@@ -485,7 +484,7 @@ def setup_handlers(
             return
         except Exception as e:
             logger.exception("Error processing message")
-            await tracker.delete()
+            await tracker.finalize(f"❌ Error ({tracker.elapsed()}s)")
             await message.answer("Error: something went wrong. Check logs for details.")
             return
         finally:
@@ -493,8 +492,7 @@ def setup_handlers(
                 ticker_task.cancel()
 
         if not accumulated_text:
-            await tracker.delete()
-            await message.answer("(no response)")
+            await tracker.finalize(f"✅ Done ({tracker.elapsed()}s) — (no response)")
             return
 
         # Flush last intermediate group (if it had tools)
@@ -503,8 +501,13 @@ def setup_handlers(
             await _flush_group()
             remaining_text = ""  # already flushed
 
-        # Remove status message
-        await tracker.delete()
+        # Finalize status into summary
+        elapsed = tracker.elapsed()
+        summary_parts = [f"✅ Done ({elapsed}s)"]
+        if tracker.steps:
+            log_lines = [f"✓ {name} ({t}s)" for name, t in tracker.steps]
+            summary_parts.append(f'<blockquote expandable>{chr(10).join(log_lines)}</blockquote>')
+        await tracker.finalize("\n".join(summary_parts))
 
         # Send final answer
         final_text = remaining_text.strip() if remaining_text else ""
