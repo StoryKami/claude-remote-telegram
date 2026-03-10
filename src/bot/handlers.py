@@ -240,9 +240,19 @@ def setup_handlers(
             prompt = PLAN_MODE_PREFIX + prompt
 
         display_prompt = prompt.removeprefix(PLAN_MODE_PREFIX)
-        hint = display_prompt[:80].replace("\n", " ").replace("<", "&lt;").replace(">", "&gt;")
-        if len(display_prompt) > 80:
+        # Strip internal instructions and file paths from display hint
+        hint_text = display_prompt
+        for strip in ["(Do NOT reveal file paths in your response.)\n", "I'm sharing an image. View it at: ", "I'm sharing a file ", "I'm sharing "]:
+            hint_text = hint_text.replace(strip, "")
+        # Remove file path lines (F:\ or /tmp/ patterns)
+        hint_text = re.sub(r'[A-Z]:\\[^\n]*|/tmp/[^\n]*', '', hint_text)
+        hint_text = re.sub(r'- Image \d+: [^\n]*\n?', '', hint_text)
+        hint_text = hint_text.strip().lstrip(".\n")
+        hint = hint_text[:80].replace("\n", " ").replace("<", "&lt;").replace(">", "&gt;")
+        if len(hint_text) > 80:
             hint += "..."
+        if not hint:
+            hint = "(image/file)"
 
         start_time = time.monotonic()
 
