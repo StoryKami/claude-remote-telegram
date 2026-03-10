@@ -44,6 +44,8 @@ _user_modes: dict[int, str] = {}
 _pending_renames: dict[int, tuple[str, int, int]] = {}
 # Cache: claude_session_id → preview text (for naming topics from /local)
 _local_preview_cache: dict[str, str] = {}
+# Permission futures: fut_id → asyncio.Future[bool]
+_permission_futures: dict[str, asyncio.Future] = {}
 # Media group buffer: media_group_id → (list of filepaths, caption, message, timer_task)
 _media_groups: dict[str, dict] = {}
 
@@ -219,11 +221,46 @@ def setup_handlers(
         accumulated_text = ""
         accumulated_thinking = ""
 
+        # Permission callback for safe mode
+        async def _ask_permission(tool_name: str, params: dict) -> bool:
+            """Ask user for permission via Telegram buttons."""
+            from src.claude.bridge import _describe_tool
+            desc = _describe_tool(tool_name, params)
+            fut_id = uuid.uuid4().hex[:8]
+            fut: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+            _permission_futures[fut_id] = fut
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Allow", callback_data=f"perm_allow:{fut_id}"),
+                InlineKeyboardButton(text="Deny", callback_data=f"perm_deny:{fut_id}"),
+            ]])
+            await message.answer(
+                f"Permission request:\n{desc}",
+                reply_markup=keyboard,
+            )
+            try:
+                return await asyncio.wait_for(fut, timeout=120)
+            except asyncio.TimeoutError:
+                return False
+            finally:
+                _permission_futures.pop(fut_id, None)
+
+        # Map mode to bridge parameters
+        sdk_permission_mode = {
+            "code": "bypassPermissions",
+            "safe": "default",
+            "plan": "plan",
+        }.get(mode, "bypassPermissions")
+
+        permission_cb = _ask_permission if mode == "safe" else None
+
         try:
             async for event in bridge.send_message(
                 prompt=prompt,
                 claude_session_id=session.claude_session_id,
                 process_key=session.id,
+                permission_mode=sdk_permission_mode,
+                permission_callback=permission_cb,
             ):
                 if _cancel_flags.get(session.id):
                     raise asyncio.CancelledError()
@@ -590,26 +627,90 @@ def setup_handlers(
         user_id = message.from_user.id
         arg = (message.text or "").replace("/mode", "").strip().lower()
 
-        if arg in ("plan", "p"):
-            _user_modes[user_id] = "plan"
-            await message.answer(
-                "Switched to **plan** mode. Claude will only analyze and plan, not modify files.",
-                parse_mode="Markdown",
-            )
-        elif arg in ("code", "c", "normal"):
-            _user_modes[user_id] = "code"
-            await message.answer(
-                "Switched to **code** mode. Claude can read, write, and execute.",
-                parse_mode="Markdown",
-            )
+        if arg:
+            _set_mode(user_id, arg)
+            desc = _MODE_DESCRIPTIONS.get(_user_modes.get(user_id, "code"), "")
+            await message.answer(f"Mode: {_user_modes.get(user_id, 'code')}\n{desc}")
         else:
             current = _user_modes.get(user_id, "code")
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"{'> ' if current == 'code' else ''}code",
+                        callback_data="mode:code",
+                    ),
+                    InlineKeyboardButton(
+                        text=f"{'> ' if current == 'safe' else ''}safe",
+                        callback_data="mode:safe",
+                    ),
+                    InlineKeyboardButton(
+                        text=f"{'> ' if current == 'plan' else ''}plan",
+                        callback_data="mode:plan",
+                    ),
+                ],
+            ])
             await message.answer(
-                f"Current mode: **{current}**\n\n"
-                "`/mode plan` — plan only (no file changes)\n"
-                "`/mode code` — full access (default)",
-                parse_mode="Markdown",
+                f"Current mode: {current}\n\n"
+                "code = full access (default)\n"
+                "safe = asks permission before tools\n"
+                "plan = read-only, no changes",
+                reply_markup=keyboard,
             )
+
+    _MODE_DESCRIPTIONS = {
+        "code": "Full access. Claude can read, write, execute.",
+        "safe": "Permission required. Claude asks before using tools.",
+        "plan": "Read-only. Claude only analyzes and plans.",
+    }
+
+    def _set_mode(user_id: int, mode_str: str) -> None:
+        mode_map = {
+            "code": "code", "c": "code", "normal": "code",
+            "safe": "safe", "s": "safe",
+            "plan": "plan", "p": "plan",
+        }
+        _user_modes[user_id] = mode_map.get(mode_str, "code")
+
+    @r.callback_query(F.data.startswith("mode:"))
+    async def cb_mode(callback: CallbackQuery) -> None:
+        assert callback.from_user and callback.data
+        mode = callback.data.split(":", 1)[1]
+        _set_mode(callback.from_user.id, mode)
+        desc = _MODE_DESCRIPTIONS.get(mode, "")
+        await callback.answer(f"Mode: {mode}")
+        if callback.message:
+            try:
+                await callback.message.edit_text(f"Mode: {mode}\n{desc}")
+            except Exception:
+                pass
+
+    @r.callback_query(F.data.startswith("perm_allow:"))
+    async def cb_perm_allow(callback: CallbackQuery) -> None:
+        assert callback.data
+        fut_id = callback.data.split(":", 1)[1]
+        fut = _permission_futures.get(fut_id)
+        if fut and not fut.done():
+            fut.set_result(True)
+        await callback.answer("Allowed")
+        if callback.message:
+            try:
+                await callback.message.edit_text(f"{callback.message.text}\n\nAllowed")
+            except Exception:
+                pass
+
+    @r.callback_query(F.data.startswith("perm_deny:"))
+    async def cb_perm_deny(callback: CallbackQuery) -> None:
+        assert callback.data
+        fut_id = callback.data.split(":", 1)[1]
+        fut = _permission_futures.get(fut_id)
+        if fut and not fut.done():
+            fut.set_result(False)
+        await callback.answer("Denied")
+        if callback.message:
+            try:
+                await callback.message.edit_text(f"{callback.message.text}\n\nDenied")
+            except Exception:
+                pass
 
     @r.message(Command("local"))
     async def cmd_local(message: Message) -> None:
