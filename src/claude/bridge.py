@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -51,6 +52,29 @@ class ClaudeBridge:
         if evt:
             evt.set()
             logger.info("Cancel requested for key=%s", key)
+
+    async def compact_session(self, claude_session_id: str) -> str:
+        """Run /compact on a session via CLI. Returns result text."""
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        try:
+            result_text = ""
+            options = ClaudeCodeOptions(
+                permission_mode="bypassPermissions",
+                cwd=str(self._workspace),
+                env=env,
+            )
+            options.resume = claude_session_id
+            async for message in query(prompt="/compact", options=options):
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            result_text += block.text
+                elif isinstance(message, ResultMessage):
+                    pass
+            return result_text or "Compacted."
+        except Exception as e:
+            logger.exception("Compact error")
+            return f"Compact failed: {e}"
 
     async def send_message(
         self,
@@ -137,7 +161,17 @@ class ClaudeBridge:
 
                 elif isinstance(message, ResultMessage):
                     result_session_id = message.session_id
-                    cost = getattr(message, "cost_usd", None) or getattr(message, "total_cost_usd", None)
+                    cost = getattr(message, "total_cost_usd", None)
+                    usage = getattr(message, "usage", None) or {}
+                    # Emit usage info for context tracking
+                    usage_str = json.dumps({
+                        "cost_usd": cost,
+                        "input_tokens": usage.get("input_tokens", 0),
+                        "output_tokens": usage.get("output_tokens", 0),
+                        "cache_read": usage.get("cache_read_input_tokens", 0),
+                        "cache_creation": usage.get("cache_creation_input_tokens", 0),
+                    })
+                    yield StreamEvent("usage", usage_str)
                     if cost:
                         accumulated_text += f"\n\n[Cost: ${cost:.4f}]"
 

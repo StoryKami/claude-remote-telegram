@@ -41,6 +41,20 @@ _message_queues: dict[str, deque[tuple[Message, str]]] = {}
 # Per-user state
 _user_modes: dict[int, str] = {}
 _user_models: dict[int, str] = {}  # user_id → model override
+_context_notify: dict[int, bool] = {}  # user_id → context % notification on/off
+# Per-session context tracking
+_session_input_tokens: dict[str, int] = {}  # session_id → last known input tokens
+_session_last_pct_notified: dict[str, int] = {}  # session_id → last notified 10% bracket
+
+# Model context window sizes
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4-6": 200_000,
+    "claude-opus-4-6[1m]": 1_000_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-haiku-4-5-20251001": 200_000,
+}
+DEFAULT_CONTEXT_WINDOW = 200_000
+AUTO_COMPACT_THRESHOLD = 0.85  # auto compact at 85%
 # Pending rename: user_id → (session_id, topic_id, chat_id)
 _pending_renames: dict[int, tuple[str, int, int]] = {}
 # Cache: claude_session_id → preview text (for naming topics from /local)
@@ -403,6 +417,36 @@ def setup_handlers(
                     await message.answer("Error: Claude CLI encountered an error. Check logs for details.")
                     return
 
+                elif event.type == "usage":
+                    try:
+                        usage_data = json.loads(event.data)
+                        input_tokens = usage_data.get("input_tokens", 0)
+                        _session_input_tokens[session.id] = input_tokens
+
+                        # Determine context window for current model
+                        effective_model = _user_models.get(user_id, "") or bridge._model or ""
+                        ctx_window = MODEL_CONTEXT_WINDOWS.get(effective_model, DEFAULT_CONTEXT_WINDOW)
+                        pct = int(input_tokens / ctx_window * 100) if ctx_window else 0
+
+                        # Notify at every 10% bracket
+                        if _context_notify.get(user_id, False):
+                            bracket = (pct // 10) * 10
+                            last_bracket = _session_last_pct_notified.get(session.id, 0)
+                            if bracket > last_bracket and bracket >= 10:
+                                _session_last_pct_notified[session.id] = bracket
+                                await message.answer(
+                                    f"📊 Context: {pct}% ({input_tokens:,} / {ctx_window:,} tokens)"
+                                )
+
+                        # Auto-compact at threshold
+                        if pct >= AUTO_COMPACT_THRESHOLD * 100 and session.claude_session_id:
+                            await message.answer(f"⚠️ Context {pct}% — auto compacting...")
+                            result = await bridge.compact_session(session.claude_session_id)
+                            await message.answer(f"Compacted: {result[:200]}")
+                            _session_last_pct_notified[session.id] = 0
+                    except Exception:
+                        logger.debug("Failed to parse usage event", exc_info=True)
+
                 elif event.type == "done":
                     if event.session_id:
                         await session_manager.set_claude_session_id(
@@ -660,6 +704,46 @@ def setup_handlers(
         bridge.request_cancel(session.id)
         await message.answer("Cancelling... (queue cleared)")
 
+    @r.message(Command("compact"))
+    async def cmd_compact(message: Message) -> None:
+        assert message.from_user
+        session = await _resolve_session(message)
+        if not session.claude_session_id:
+            await message.answer("No active Claude session to compact.")
+            return
+        await message.answer("Compacting...")
+        result = await bridge.compact_session(session.claude_session_id)
+        _session_last_pct_notified.pop(session.id, None)
+        await message.answer(f"Done: {result[:500]}")
+
+    @r.message(Command("context"))
+    async def cmd_context(message: Message) -> None:
+        assert message.from_user
+        user_id = message.from_user.id
+        arg = _cmd_arg(message.text, "context").lower()
+
+        if arg in ("on", "1"):
+            _context_notify[user_id] = True
+            await message.answer("Context notifications: ON\nWill notify at every 10% usage.")
+        elif arg in ("off", "0"):
+            _context_notify[user_id] = False
+            await message.answer("Context notifications: OFF")
+        else:
+            # Show current context info
+            session = await _resolve_session(message)
+            tokens = _session_input_tokens.get(session.id, 0)
+            effective_model = _user_models.get(user_id, "") or bridge._model or ""
+            ctx_window = MODEL_CONTEXT_WINDOWS.get(effective_model, DEFAULT_CONTEXT_WINDOW)
+            pct = int(tokens / ctx_window * 100) if ctx_window else 0
+            notify_status = "ON" if _context_notify.get(user_id, False) else "OFF"
+            await message.answer(
+                f"📊 Context: {pct}% ({tokens:,} / {ctx_window:,} tokens)\n"
+                f"Model: {effective_model or 'default'}\n"
+                f"Notifications: {notify_status}\n\n"
+                f"/context on — enable 10% notifications\n"
+                f"/context off — disable"
+            )
+
     @r.message(Command("close"))
     async def cmd_close(message: Message) -> None:
         """Close current session (can be reopened later)."""
@@ -797,6 +881,21 @@ def setup_handlers(
         arg = _cmd_arg(message.text, "model").lower()
 
         if arg:
+            new_model = AVAILABLE_MODELS.get(arg, arg if arg not in ("default", "reset", "auto") else "")
+
+            # Check if switching to a smaller context window needs compact
+            if new_model:
+                session = await _resolve_session(message)
+                tokens = _session_input_tokens.get(session.id, 0)
+                new_ctx = MODEL_CONTEXT_WINDOWS.get(new_model, DEFAULT_CONTEXT_WINDOW)
+                if tokens > 0 and tokens > new_ctx * 0.8 and session.claude_session_id:
+                    await message.answer(
+                        f"⚠️ Current context ({tokens:,} tokens) exceeds 80% of {new_model}'s window ({new_ctx:,}). Compacting first..."
+                    )
+                    result = await bridge.compact_session(session.claude_session_id)
+                    await message.answer(f"Compacted: {result[:200]}")
+                    _session_last_pct_notified.pop(session.id, None)
+
             if arg in AVAILABLE_MODELS:
                 _user_models[user_id] = AVAILABLE_MODELS[arg]
                 await message.answer(f"Model: {arg} ({AVAILABLE_MODELS[arg]})")
@@ -804,7 +903,6 @@ def setup_handlers(
                 _user_models.pop(user_id, None)
                 await message.answer("Model: default (from config)")
             else:
-                # Allow full model ID directly
                 _user_models[user_id] = arg
                 await message.answer(f"Model: {arg}")
         else:
@@ -1223,7 +1321,7 @@ def setup_handlers(
     _bot_commands = {
         "start", "help", "new", "sessions", "switch",
         "current", "rename", "delete", "cancel", "close", "reopen",
-        "mode", "model", "restart", "pull", "local",
+        "mode", "model", "compact", "context", "restart", "pull", "local",
     }
 
     def _is_bot_command(text: str) -> bool:
