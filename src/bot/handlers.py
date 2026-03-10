@@ -40,6 +40,7 @@ _cancel_flags: dict[str, bool] = {}
 _message_queues: dict[str, deque[tuple[Message, str]]] = {}
 # Per-user state
 _user_modes: dict[int, str] = {}
+_user_models: dict[int, str] = {}  # user_id → model override
 # Pending rename: user_id → (session_id, topic_id, chat_id)
 _pending_renames: dict[int, tuple[str, int, int]] = {}
 # Cache: claude_session_id → preview text (for naming topics from /local)
@@ -359,6 +360,7 @@ def setup_handlers(
                 process_key=session.id,
                 permission_mode=sdk_permission_mode,
                 permission_callback=permission_cb,
+                model=_user_models.get(user_id),
             ):
                 if _cancel_flags.get(session.id):
                     raise asyncio.CancelledError()
@@ -782,6 +784,67 @@ def setup_handlers(
             except Exception:
                 pass
 
+    AVAILABLE_MODELS = {
+        "opus": "claude-opus-4-6",
+        "sonnet": "claude-sonnet-4-6",
+        "haiku": "claude-haiku-4-5-20251001",
+    }
+
+    @r.message(Command("model"))
+    async def cmd_model(message: Message) -> None:
+        assert message.from_user
+        user_id = message.from_user.id
+        arg = _cmd_arg(message.text, "model").lower()
+
+        if arg:
+            if arg in AVAILABLE_MODELS:
+                _user_models[user_id] = AVAILABLE_MODELS[arg]
+                await message.answer(f"Model: {arg} ({AVAILABLE_MODELS[arg]})")
+            elif arg in ("default", "reset", "auto"):
+                _user_models.pop(user_id, None)
+                await message.answer("Model: default (from config)")
+            else:
+                # Allow full model ID directly
+                _user_models[user_id] = arg
+                await message.answer(f"Model: {arg}")
+        else:
+            current = _user_models.get(user_id, "default")
+            buttons = []
+            for short, full in AVAILABLE_MODELS.items():
+                prefix = "> " if current == full else ""
+                buttons.append(InlineKeyboardButton(
+                    text=f"{prefix}{short}", callback_data=f"model:{short}",
+                ))
+            buttons.append(InlineKeyboardButton(
+                text=f"{'> ' if current == 'default' else ''}default",
+                callback_data="model:default",
+            ))
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+            await message.answer(
+                f"Current model: {current}\n\nopus / sonnet / haiku / default",
+                reply_markup=keyboard,
+            )
+
+    @r.callback_query(F.data.startswith("model:"))
+    async def cb_model(callback: CallbackQuery) -> None:
+        assert callback.from_user and callback.data
+        choice = callback.data.split(":", 1)[1]
+        user_id = callback.from_user.id
+        if choice == "default":
+            _user_models.pop(user_id, None)
+            label = "default"
+        elif choice in AVAILABLE_MODELS:
+            _user_models[user_id] = AVAILABLE_MODELS[choice]
+            label = f"{choice} ({AVAILABLE_MODELS[choice]})"
+        else:
+            label = choice
+        await callback.answer(f"Model: {label}")
+        if callback.message:
+            try:
+                await callback.message.edit_text(f"Model: {label}")
+            except Exception:
+                pass
+
     @r.callback_query(F.data.startswith("perm_allow:"))
     async def cb_perm_allow(callback: CallbackQuery) -> None:
         assert callback.data
@@ -1160,7 +1223,7 @@ def setup_handlers(
     _bot_commands = {
         "start", "help", "new", "sessions", "switch",
         "current", "rename", "delete", "cancel", "close", "reopen",
-        "mode", "restart", "pull", "local",
+        "mode", "model", "restart", "pull", "local",
     }
 
     def _is_bot_command(text: str) -> bool:

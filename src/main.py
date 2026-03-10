@@ -75,6 +75,7 @@ async def main() -> None:
             BotCommand(command="rename", description="Rename session"),
             BotCommand(command="delete", description="Delete session"),
             BotCommand(command="mode", description="View/switch mode (plan|code)"),
+            BotCommand(command="model", description="Switch Claude model (opus|sonnet|haiku)"),
             BotCommand(command="cancel", description="Cancel current request"),
             BotCommand(command="local", description="List local Claude sessions"),
             BotCommand(command="pull", description="Git pull + restart"),

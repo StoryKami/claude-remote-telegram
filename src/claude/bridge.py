@@ -59,6 +59,7 @@ class ClaudeBridge:
         process_key: str | None = None,
         permission_mode: str | None = None,
         permission_callback: PermissionCallback | None = None,
+        model: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         mode = permission_mode or self._default_permission_mode
 
@@ -80,8 +81,9 @@ class ClaudeBridge:
             env=env,
             can_use_tool=can_use_tool if permission_callback or mode == "default" else None,
         )
-        if self._model:
-            options.model = self._model
+        effective_model = model or self._model
+        if effective_model:
+            options.model = effective_model
         if claude_session_id:
             options.resume = claude_session_id
 
